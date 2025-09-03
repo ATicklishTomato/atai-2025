@@ -1,1 +1,3 @@
 data/CFD/grid/concat/*
+.venv
+.idea
