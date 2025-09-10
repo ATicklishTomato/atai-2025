@@ -4,4 +4,5 @@ notebook==7.4.5
 --find-links https://download.pytorch.org/whl/cu129
 torch
 torchvision
+torch_geometric
 tqdm==4.67.1
