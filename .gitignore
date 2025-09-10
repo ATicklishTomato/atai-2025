@@ -1,3 +1,4 @@
 data/CFD/grid/concat/*
 .venv
 .idea
+data/boids/processed/*
