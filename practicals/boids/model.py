@@ -1,6 +1,9 @@
 import torch 
 import torch_geometric
-from torch_geometric.data import Data, DataLoader, InMemoryDataset
+from torch_geometric.data import Data, InMemoryDataset
+from torch_geometric.loader import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torch.nn.utils import clip_grad_norm_
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -314,22 +317,6 @@ trajectories = [np.load(f"../../data/boids/raw/{f}") for f in os.listdir("../../
 print(len(trajectories))
 
 
-print("Single trajectory shape:")
-print(trajectories[0].shape)
-print("The axes and their cardinalities; (Timesteps:1000, Boids:25, (Position X, Position Y, Velocity x, Velocity y):4)")
-
-# Print the mean, std, min and max of the boid positions, velocities
-positions = np.array([t[:, :, :2] for t in trajectories])
-velocities = np.array([t[:, :, 2:] for t in trajectories])
-
-print("Position mean, std, min, max:")
-# Round to 2 decimal places
-print(round(np.mean(positions),2), round(np.std(positions),2), round(np.min(positions), 2), round(np.max(positions), 2))
-print()
-print("Velocity mean, std, min, max:")
-# Round to 2 decimal places
-print(round(np.mean(velocities),2), round(np.std(velocities),2), round(np.min(velocities), 2), round(np.max(velocities), 2))
-
 def plot_state(trajectory, timestep):
     fig, ax = plt.subplots()
     # Plot dots for the boids
@@ -359,47 +346,66 @@ class EGNNLayer(torch.nn.Module):
     Based on Satorras et al. "E(n) Equivariant Graph Neural Networks"
     """
     
-    def __init__(self, hidden_node_dim=1, hidden_edge_dim=32):
+    def __init__(self, hidden_node_dim=64, hidden_edge_dim=32, width=1000.0, height=1000.0):
         super(EGNNLayer, self).__init__()
         
+        # Periodic box sizes (for minimal image convention)
+        self.width = float(width)
+        self.height = float(height)
+        
         # φ_e: Edge message function - takes [h_i, h_j, ||x_i - x_j||²]
+        # Paper: Input → LinearLayer → Swish → LinearLayer → Swish → Output
         self.phi_e = torch.nn.Sequential(
             torch.nn.Linear(2 * hidden_node_dim + 1, hidden_edge_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_edge_dim, hidden_edge_dim)
+            torch.nn.SiLU(),  # SiLU is the same as Swish
+            torch.nn.Linear(hidden_edge_dim, hidden_edge_dim),
+            torch.nn.SiLU()
         )
         
         # φ_x: Coordinate weight function - takes edge message and outputs scalar
+        # Paper: m_ij → LinearLayer → Swish → LinearLayer → Output
         self.phi_x = torch.nn.Sequential(
             torch.nn.Linear(hidden_edge_dim, hidden_edge_dim),
-            torch.nn.ReLU(),
+            torch.nn.SiLU(),  # SiLU is the same as Swish
             torch.nn.Linear(hidden_edge_dim, 1)
         )
         
         # φ_v: Velocity scaling function - takes node embedding and outputs velocity scale
         self.phi_v = torch.nn.Sequential(
             torch.nn.Linear(hidden_node_dim, hidden_node_dim),
-            torch.nn.ReLU(),
+            torch.nn.SiLU(),  # SiLU is the same as Swish
             torch.nn.Linear(hidden_node_dim, 2)  # Output 2D for velocity scaling
         )
         
         # φ_h: Node update function - takes [h_i, aggregate_messages]
+        # Paper: [h_i, m_i] → LinearLayer → Swish → LinearLayer → Addition(h_i) → h_i^{l+1}
+        # Note: We'll implement the residual connection in the forward pass
         self.phi_h = torch.nn.Sequential(
             torch.nn.Linear(hidden_node_dim + hidden_edge_dim, hidden_node_dim),
-            torch.nn.ReLU(),
+            torch.nn.SiLU(),  # SiLU is the same as Swish
             torch.nn.Linear(hidden_node_dim, hidden_node_dim)
         )
         
         # Initialize weights with smaller values
         self._init_weights()
         
+    def _minimal_image(self, delta, device):
+        """Apply minimal image convention to 2D displacements under PBC."""
+        half_sizes = torch.tensor([self.width / 2.0, self.height / 2.0], device=device, dtype=delta.dtype)
+        sizes = torch.tensor([self.width, self.height], device=device, dtype=delta.dtype)
+        return torch.remainder(delta + half_sizes, sizes) - half_sizes
+
     def _init_weights(self):
-        """Initialize weights with smaller values to prevent exploding gradients"""
+        """Initialize weights using Xavier uniform with default gain."""
         for module in [self.phi_e, self.phi_x, self.phi_v, self.phi_h]:
             for layer in module:
                 if isinstance(layer, torch.nn.Linear):
-                    torch.nn.init.xavier_uniform_(layer.weight, gain=0.1)
+                    torch.nn.init.xavier_uniform_(layer.weight)
                     torch.nn.init.zeros_(layer.bias)
+        # Zero-init final coord weight layer so initial coordinate weights are near zero
+        if isinstance(self.phi_x[-1], torch.nn.Linear):
+            torch.nn.init.zeros_(self.phi_x[-1].weight)
+            torch.nn.init.zeros_(self.phi_x[-1].bias)
         
     def forward(self, nodes, pos, vel_init, edge_index):
         """
@@ -437,7 +443,9 @@ class EGNNLayer(torch.nn.Module):
             # Aggregate messages and update node embeddings
             with timer.time("node_updates"):
                 aggregate_messages = self.aggregate_messages(messages, edge_index, N)
-                nodes_new = self.phi_h(torch.cat([nodes, aggregate_messages], dim=1))
+                # Apply phi_h and add residual connection as per paper
+                node_update = self.phi_h(torch.cat([nodes, aggregate_messages], dim=1))
+                nodes_new = nodes + node_update  # Residual connection: h_i^{l+1} = h_i^l + phi_h(...)
             
             return nodes_new, pos_new, vel_new
     
@@ -455,15 +463,23 @@ class EGNNLayer(torch.nn.Module):
         pos_i = pos[edge_target_ids]  # [E, 2] - target positions
         pos_j = pos[edge_source_ids]  # [E, 2] - source positions
         
-        # Compute squared distances ||x_i - x_j||² with small epsilon for numerical stability
-        dist_squared = ((pos_i - pos_j) ** 2).sum(dim=1, keepdim=True) + 1e-8  # [E, 1]
-        # Normalize distance to prevent numerical instability (scale by typical distance)
-        dist_squared = dist_squared / 10000.0  # Scale down the distance
+        # Compute minimal-image position differences
+        pos_diff_ij = self._minimal_image(pos_i - pos_j, pos.device)  # [E, 2]
         
+        # Compute distances ||x_i - x_j||
+        dist_squared = (pos_diff_ij ** 2).sum(dim=1, keepdim=True)  # [E, 1]
+        dist = torch.sqrt(dist_squared)  # [E, 1]
+        dist_normalized = dist / 1000.0  # [E, 1]
+
         # Create message input [h_i, h_j, ||x_i - x_j||²]
-        message_input = torch.cat([h_i, h_j, dist_squared], dim=1)  # [E, 2*hidden_node_dim + 1]
+        message_input = torch.cat([h_i, h_j, dist_normalized], dim=1)  # [E, 2*hidden_node_dim + 1]
         # Compute messages
         messages = self.phi_e(message_input)  # [E, hidden_edge_dim]
+        # Lightweight diagnostics
+        try:
+            self._last_messages_abs_mean = messages.detach().abs().mean()
+        except Exception:
+            self._last_messages_abs_mean = torch.tensor(0.0, device=messages.device)
         
         return messages
     
@@ -477,31 +493,33 @@ class EGNNLayer(torch.nn.Module):
         pos_i = pos[edge_target_ids]  # [E, 2] - target positions  
         pos_j = pos[edge_source_ids]  # [E, 2] - source positions
         
-        # Compute position differences (x_i - x_j)
-        pos_diff = pos_i - pos_j  # [E, 2]
-        
-        # Normalize position differences to prevent exploding gradients
-        # Scale by typical distance (assuming 1000x1000 box, typical distance ~500)
-        pos_diff_normalized = pos_diff / 500.0  # [E, 2]
+        # Compute minimal-image position differences (x_i - x_j)
+        pos_diff = self._minimal_image(pos_i - pos_j, pos.device)  # [E, 2]
         
         # Compute coordinate weights φ_x(m_ij)
         coord_weights = self.phi_x(messages)  # [E, 1]
         
-        # Apply small scaling factor to coordinate weights to prevent explosion
-        coord_weights = torch.tanh(coord_weights) * 0.1  # Keep weights small
+        # Diagnostics
+        try:
+            self._last_coord_weight_abs_mean = coord_weights.detach().abs().mean()
+        except Exception:
+            self._last_coord_weight_abs_mean = torch.tensor(0.0, device=pos.device)
         
         # Weighted position differences
-        weighted_pos_diff = pos_diff_normalized * coord_weights  # [E, 2]
+        weighted_pos_diff = pos_diff * coord_weights  # [E, 2]
         
         # Aggregate by target nodes (sum over j for each i)
         vel_update = torch.zeros(N, 2, device=pos.device)
         vel_update.index_add_(0, edge_target_ids, weighted_pos_diff)
+        # More diagnostics
+        try:
+            self._last_vel_update_norm_mean = vel_update.detach().norm(dim=1).mean()
+        except Exception:
+            self._last_vel_update_norm_mean = torch.tensor(0.0, device=pos.device)
         
-        # Normalize by number of neighbors (avoid division by zero)
-        num_neighbors = N-1
-        if num_neighbors == 0:
-            raise ValueError("Number of neighbors is zero, cannot normalize velocity update.")
-        vel_update = vel_update / num_neighbors
+        # Normalize by per-node in-degree (handles batched graphs correctly)
+        degrees = torch.bincount(edge_target_ids, minlength=pos.size(0)).unsqueeze(1)
+        vel_update = vel_update / degrees.clamp(min=1)
         
         return vel_update
     
@@ -522,15 +540,15 @@ class EGNN(torch.nn.Module):
     Full E(n) Equivariant Graph Neural Network for Boids
     """
     
-    def __init__(self, hidden_node_dim=1, hidden_edge_dim=32, num_layers=3, num_nodes=25):
+    def __init__(self, hidden_node_dim=64, hidden_edge_dim=32, num_layers=4, num_nodes=25, width=1000.0, height=1000.0):
         super(EGNN, self).__init__()
         
-        # Learnable node embeddings
-        self.node_embeddings = torch.nn.Parameter(torch.randn(num_nodes, hidden_node_dim) * 0.1)  # Smaller initialization
+        # Store dims
+        self.hidden_node_dim = hidden_node_dim
         
         # EGNN layers
         self.layers = torch.nn.ModuleList([
-            EGNNLayer(hidden_node_dim, hidden_edge_dim) 
+            EGNNLayer(hidden_node_dim, hidden_edge_dim, width=width, height=height) 
             for _ in range(num_layers)
         ])
         
@@ -547,18 +565,26 @@ class EGNN(torch.nn.Module):
         Note: Output predicts position deltas and new velocities for balanced loss computation
         """
         with timer.time("egnn_forward"):
-            N = data.x.shape[0]
-            
-            # Use learnable node embeddings and extract features
-            nodes = self.node_embeddings[:N].clone()  # [N, hidden_node_dim]
-            pos = data.x[:, :2]        # [N, 2] positions
-            vel_init = data.x[:, 2:]   # [N, 2] initial velocities (preserved)
+            # Extract features
+            pos = data.x[:, :2]        # [N_total, 2] positions
+            vel_init = data.x[:, 2:]   # [N_total, 2] initial velocities (preserved)
+
+            # Initialize node embeddings simply as zeros; batching is handled implicitly by concatenation
+            nodes = torch.zeros(pos.size(0), self.hidden_node_dim, device=pos.device)
             
             # Apply EGNN layers, always using the initial velocities
+            self.last_layer_stats = []
             for i, layer in enumerate(self.layers):
                 with timer.time(f"layer_{i}"):
                     nodes, pos, vel_current = layer(nodes, pos, vel_init, data.edge_index)
                     # Note: We get vel_current from each layer but always pass vel_init to the next layer
+                    # Collect lightweight per-layer stats for visibility
+                    stats = {
+                        "messages_abs_mean": float(getattr(layer, "_last_messages_abs_mean", torch.tensor(0.0)).detach().item()),
+                        "coord_weight_abs_mean": float(getattr(layer, "_last_coord_weight_abs_mean", torch.tensor(0.0)).detach().item()),
+                        "vel_update_norm_mean": float(getattr(layer, "_last_vel_update_norm_mean", torch.tensor(0.0)).detach().item()),
+                    }
+                    self.last_layer_stats.append(stats)
             
             # Calculate position delta from initial positions
             pos_delta = pos - data.x[:, :2]  # [N, 2] - difference from input positions
@@ -576,13 +602,15 @@ class AR_EGNN_Dataset(InMemoryDataset):
     Position deltas have similar magnitude to velocities, making loss contributions balanced.
     Node embeddings are learnable parameters in the model, not stored in the dataset.
     """
-    def __init__(self, raw_data_path, processed_data_path, root=None, transform=None, pre_transform=None, post_transform=None, solution_idx_range=(0, 25), timesteps=1000, processed_file_name="AR1_EGNN_Boids.pt", hidden_node_dim=1):
+    def __init__(self, raw_data_path, processed_data_path, root=None, transform=None, pre_transform=None, post_transform=None, solution_idx_range=(0, 25), timesteps=1000, processed_file_name="AR1_EGNN_Boids.pt", hidden_node_dim=1, width=1000, height=1000):
         self.raw_data_path = raw_data_path
         self.processed_data_path = processed_data_path
         self.solution_idx_range = solution_idx_range
         self.timesteps = timesteps
         self.processed_file_name = processed_file_name
         self.hidden_node_dim = hidden_node_dim
+        self.width = width
+        self.height = height
         self.pre_transform = pre_transform
         self.transform = transform
         self.post_transform = post_transform
@@ -627,12 +655,11 @@ class AR_EGNN_Dataset(InMemoryDataset):
                     # Position delta with periodic boundary conditions handled properly
                     raw_pos_delta = next_state[:, :2] - curr_state[:, :2]  # [N, 2] - raw position differences
                     
-                    # Handle periodic boundary conditions (assuming box size 1000x1000)
-                    # If delta > 500, the boid moved across the boundary in negative direction
-                    # If delta < -500, the boid moved across the boundary in positive direction
-                    pos_delta = raw_pos_delta.clone()
-                    pos_delta[raw_pos_delta > 500] -= 1000  # Wrap large positive deltas
-                    pos_delta[raw_pos_delta < -500] += 1000  # Wrap large negative deltas
+                    # Wrap deltas to the minimal displacement in [-L/2, L/2)
+                    # Use component-wise modulo with domain sizes (width, height)
+                    half_sizes = torch.tensor([self.width / 2.0, self.height / 2.0], device=raw_pos_delta.device, dtype=raw_pos_delta.dtype)
+                    sizes = torch.tensor([self.width, self.height], device=raw_pos_delta.device, dtype=raw_pos_delta.dtype)
+                    pos_delta = torch.remainder(raw_pos_delta + half_sizes, sizes) - half_sizes
                     
                     vel_new = next_state[:, 2:]  # [N, 2] - new velocities
                     y = torch.cat([pos_delta, vel_new], dim=1)  # [N, 4] - [pos_delta_x, pos_delta_y, vel_x, vel_y]
@@ -640,13 +667,13 @@ class AR_EGNN_Dataset(InMemoryDataset):
                     # Fully connected graph
                     edge_index = torch.tensor([[i, j] for i in range(N) for j in range(N) if i != j], dtype=torch.long).t().contiguous()
         
+                    data = Data(x=x, y=y, edge_index=edge_index)
                     if self.post_transform is not None:
                         data = self.post_transform(data)
-                    
-                    data = Data(x=x, y=y, edge_index=edge_index)
                     data_list.append(data)
                 
             data, slices = self.collate(data_list)
+            os.makedirs(self.processed_data_path, exist_ok=True)
             torch.save((data, slices), self.processed_data_path + self.processed_file_name)
 
     def __getitem__(self, idx):
@@ -657,7 +684,7 @@ class AR_EGNN_Dataset(InMemoryDataset):
     
 
 class Trainer:
-    def __init__(self, model, train_dataset, validation_dataset, batch_size=1, lr=0.0001, epochs=100, loss_fn=torch.nn.MSELoss(), model_name= "01-AR-Set-Model.pt"):
+    def __init__(self, model, train_dataset, validation_dataset, batch_size=1, lr=0.0001, epochs=100, loss_fn=torch.nn.MSELoss(), model_name= "Model.pt", grad_clip_max_norm=1.0):
         """
         Simple Trainer class to train a PyTorch (geometric) model on a dataset.
 
@@ -678,14 +705,24 @@ class Trainer:
         self.epochs = epochs
         self.loss_fn = loss_fn
         self.model_name = model_name
+        self.grad_clip_max_norm = grad_clip_max_norm
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("Using device:", self.device)
         self.model.to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        # TensorBoard writer
+        os.makedirs("../../runs", exist_ok=True)
+        self.writer = SummaryWriter(log_dir=f"../../runs/egnn_{int(time.time())}")
 
         self.train_loader = self.make_data_loader(self.train_dataset)
         self.validation_loader = self.make_data_loader(self.validation_dataset, shuffle=False)
+
+        # Ensure model directory exists
+        os.makedirs("../../models", exist_ok=True)
+
+        # Compute constant-velocity baselines
+        self._report_constant_velocity_baseline()
 
     def make_data_loader(self, dataset, shuffle=True):
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
@@ -701,16 +738,27 @@ class Trainer:
                     # Train the model
                     with timer.time("train_phase"):
                         self.model.train()
-                        mean_train_loss = 0
+                        sum_train_loss = 0.0
+                        sum_train_grad_norm = 0.0
+                        num_train_batches = 0
+                        # Per-layer epoch accumulators
+                        num_layers = len(self.model.layers)
+                        layer_sums = [
+                            {"messages_abs_mean": 0.0, "coord_weight_abs_mean": 0.0, "vel_update_norm_mean": 0.0}
+                            for _ in range(num_layers)
+                        ]
                         for i, data in enumerate(self.train_loader):
                             with timer.time("batch"):
-                                data = self.train_dataset[i].to(self.device)
+                                data = data.to(self.device)
                                 
                                 # Forward pass
                                 with timer.time("forward"):
                                     self.optimizer.zero_grad()
                                     out = self.model(data)
-                                    loss = self.loss_fn(out[:, 2:], data.y[:, 2:])  # The loss is computed on the velocities only
+                                    # Balanced loss: include position deltas and velocities
+                                    loss_pos = self.loss_fn(out[:, :2], data.y[:, :2])
+                                    loss_vel = self.loss_fn(out[:, 2:], data.y[:, 2:])
+                                    loss = loss_pos + loss_vel
                                 
                                 # Debug first few iterations to understand what's happening
                                 if epoch == 0 and i < 3:
@@ -731,22 +779,46 @@ class Trainer:
                                 # Backward pass
                                 with timer.time("backward"):
                                     loss.backward()
+                                    # Gradient clipping and norm logging
+                                    total_norm = float(clip_grad_norm_(self.model.parameters(), self.grad_clip_max_norm))
+                                    sum_train_grad_norm += total_norm
                                     self.optimizer.step()
                                 
-                                mean_train_loss += loss.item()
-                        mean_train_loss /= i
+                                sum_train_loss += float(loss.item())
+                                # Accumulate per-layer stats
+                                for li, stats in enumerate(getattr(self.model, "last_layer_stats", [])):
+                                    for k in layer_sums[li].keys():
+                                        layer_sums[li][k] += float(stats.get(k, 0.0))
+                                num_train_batches += 1
+                        mean_train_loss = sum_train_loss / max(1, num_train_batches)
+                        mean_train_grad_norm = sum_train_grad_norm / max(1, num_train_batches)
                     
                     # Validate the model
                     with timer.time("validation"):
                         self.model.eval()
-                        mean_val_loss = 0
+                        sum_val_loss = 0.0
+                        num_val_batches = 0
+                        # Per-layer epoch accumulators (validation)
+                        num_layers = len(self.model.layers)
+                        layer_sums_val = [
+                            {"messages_abs_mean": 0.0, "coord_weight_abs_mean": 0.0, "vel_update_norm_mean": 0.0}
+                            for _ in range(num_layers)
+                        ]
                         with torch.no_grad():
                             for i, data in enumerate(self.validation_loader):
-                                data = self.validation_dataset[i].to(self.device)
+                                data = data.to(self.device)
                                 out = self.model(data)
-                                loss = self.loss_fn(out[:, 2:], data.y[:, 2:])  # The loss is computed on the velocities only
-                                mean_val_loss += loss.item()
-                            mean_val_loss /= i
+                                # Balanced loss: include position deltas and velocities
+                                loss_pos = self.loss_fn(out[:, :2], data.y[:, :2])
+                                loss_vel = self.loss_fn(out[:, 2:], data.y[:, 2:])
+                                loss = loss_pos + loss_vel
+                                sum_val_loss += float(loss.item())
+                                # Accumulate per-layer stats
+                                for li, stats in enumerate(getattr(self.model, "last_layer_stats", [])):
+                                    for k in layer_sums_val[li].keys():
+                                        layer_sums_val[li][k] += float(stats.get(k, 0.0))
+                                num_val_batches += 1
+                            mean_val_loss = sum_val_loss / max(1, num_val_batches)
 
                     # Save best model
                     if mean_val_loss < best_model_loss:
@@ -754,6 +826,23 @@ class Trainer:
                         torch.save(self.model.state_dict(), f"../../models/{self.model_name}")
                     
                     print(f"Epoch {epoch}, Train Loss: {mean_train_loss:.6f}, Val Loss: {mean_val_loss:.6f}")
+
+                    # LR logging (no scheduler)
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    # TensorBoard logging (epoch-level)
+                    self.writer.add_scalar("loss/train", mean_train_loss, epoch)
+                    self.writer.add_scalar("loss/val", mean_val_loss, epoch)
+                    self.writer.add_scalar("optimizer/lr", current_lr, epoch)
+                    self.writer.add_scalar("grad/total_norm", mean_train_grad_norm, epoch)
+                    # Log averaged per-layer stats
+                    if num_train_batches > 0:
+                        for li in range(len(layer_sums)):
+                            for k, v in layer_sums[li].items():
+                                self.writer.add_scalar(f"train/layer_{li}/{k}", v / num_train_batches, epoch)
+                    if num_val_batches > 0:
+                        for li in range(len(layer_sums_val)):
+                            for k, v in layer_sums_val[li].items():
+                                self.writer.add_scalar(f"val/layer_{li}/{k}", v / num_val_batches, epoch)
                 
                 # Print timing report after each epoch
                 if epoch == 0:  # Print detailed timing for first epoch
@@ -763,12 +852,36 @@ class Trainer:
                     print(f"\n=== EPOCH {epoch} TIMING ===")
                     timer.print_timings()
 
+        # Close writer at end
+        self.writer.close()
+
+    def _report_constant_velocity_baseline(self):
+        """Compute constant-velocity baseline with current training objective (pos_delta + vel)."""
+        def dataset_combined_loss(dataset):
+            loss_sum = 0.0
+            count = 0
+            for i in range(len(dataset)):
+                d = dataset[i]
+                # Constant-velocity predictor: Δx ≈ v_t, v_{t+1} ≈ v_t
+                pred_pos_delta = d.x[:, 2:]
+                pred_vel = d.x[:, 2:]
+                target_pos_delta = d.y[:, :2]
+                target_vel = d.y[:, 2:]
+                loss = torch.mean((pred_pos_delta - target_pos_delta) ** 2) + \
+                       torch.mean((pred_vel - target_vel) ** 2)
+                loss_sum += float(loss.item())
+                count += 1
+            return loss_sum / max(1, count)
+        train_loss = dataset_combined_loss(self.train_dataset)
+        val_loss = dataset_combined_loss(self.validation_dataset)
+        print(f"Baseline (const vel) combined loss -> Train: {train_loss:.6f}, Val: {val_loss:.6f}")
+
 
 # Train the EGNN model and perform rollouts
 print("=== Training EGNN Model ===")
 
 # Create and train EGNN model
-egnn_model = EGNN(hidden_node_dim=1, hidden_edge_dim=32, num_layers=3, num_nodes=25)
+egnn_model = EGNN(hidden_node_dim=64, hidden_edge_dim=128, num_layers=4, num_nodes=25)
 
 # Create datasets
 train_dataset = AR_EGNN_Dataset(
@@ -792,9 +905,9 @@ egnn_trainer = Trainer(
     model=egnn_model, 
     train_dataset=train_dataset,
     validation_dataset=validation_dataset,
-    batch_size=8, 
+    batch_size=16, 
     lr=0.0001,
-    epochs=100, 
+    epochs=20, 
     loss_fn=torch.nn.MSELoss(), 
     model_name="EGNN-Model.pt"
 )
@@ -809,7 +922,7 @@ print("Training completed.")
 print("\n=== Generating EGNN Rollouts ===")
 
 # Load the best trained model
-egnn_model = EGNN(hidden_node_dim=1, hidden_edge_dim=32, num_layers=3, num_nodes=25)
+egnn_model = EGNN(hidden_node_dim=64, hidden_edge_dim=128, num_layers=4, num_nodes=25)
 egnn_model.load_state_dict(torch.load("../../models/EGNN-Model.pt"))
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 egnn_model.to(device)
