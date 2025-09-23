@@ -386,8 +386,6 @@ class EGNNLayer(torch.nn.Module):
             torch.nn.Linear(hidden_node_dim, hidden_node_dim)
         )
         
-        # Initialize weights with smaller values
-        self._init_weights()
         
     def _minimal_image(self, delta, device):
         """Apply minimal image convention to 2D displacements under PBC."""
@@ -395,19 +393,8 @@ class EGNNLayer(torch.nn.Module):
         sizes = torch.tensor([self.width, self.height], device=device, dtype=delta.dtype)
         return torch.remainder(delta + half_sizes, sizes) - half_sizes
 
-    def _init_weights(self):
-        """Initialize weights using Xavier uniform with default gain."""
-        for module in [self.phi_e, self.phi_x, self.phi_v, self.phi_h]:
-            for layer in module:
-                if isinstance(layer, torch.nn.Linear):
-                    torch.nn.init.xavier_uniform_(layer.weight)
-                    torch.nn.init.zeros_(layer.bias)
-        # Zero-init final coord weight layer so initial coordinate weights are near zero
-        if isinstance(self.phi_x[-1], torch.nn.Linear):
-            torch.nn.init.zeros_(self.phi_x[-1].weight)
-            torch.nn.init.zeros_(self.phi_x[-1].bias)
         
-    def forward(self, nodes, pos, vel_init, edge_index):
+    def forward(self, nodes, pos, vel_init, edge_index, trace_node_index=None):
         """
         Single EGNN layer forward pass
         
@@ -432,13 +419,27 @@ class EGNNLayer(torch.nn.Module):
             # Compute φ_v(h_i)*v_i^{init} (always use initial velocities, not updated ones)
             vel_node_update = self.phi_v(nodes) * vel_init  # [N, 2]
             
-            # Compute (1/N)*Σ_{j≠i}(x_i - x_j)*φ_x(m_ij)
             with timer.time("velocity_updates"):
+                # Compute (1/N)*Σ_{j≠i}(x_i - x_j)*φ_x(m_ij)
                 vel_message_update = self.compute_velocity_message_update(pos, messages, edge_index, N)
                 # Update velocity: v_i^{l+1} = φ_v(h_i)*v_i^{init} + (1/N)*Σ_{j≠i}(x_i - x_j)*φ_x(m_ij)
                 vel_new = vel_node_update + vel_message_update
                 # Update position: x_i^{l+1} = x_i + v_i^{l+1}
                 pos_new = pos + vel_new
+
+                # Optional tracing for a specific node
+                if trace_node_index is not None:
+                    try:
+                        idx = int(trace_node_index)
+                        self._last_trace = {
+                            "pos_in": pos[idx].detach().to("cpu"),
+                            "vel_node_update": vel_node_update[idx].detach().to("cpu"),
+                            "vel_message_update": vel_message_update[idx].detach().to("cpu"),
+                            "vel_new": vel_new[idx].detach().to("cpu"),
+                            "pos_out": pos_new[idx].detach().to("cpu"),
+                        }
+                    except Exception:
+                        self._last_trace = None
             
             # Aggregate messages and update node embeddings
             with timer.time("node_updates"):
@@ -469,7 +470,7 @@ class EGNNLayer(torch.nn.Module):
         # Compute distances ||x_i - x_j||
         dist_squared = (pos_diff_ij ** 2).sum(dim=1, keepdim=True)  # [E, 1]
         dist = torch.sqrt(dist_squared)  # [E, 1]
-        dist_normalized = dist / 1000.0  # [E, 1]
+        dist_normalized = dist / 100.0  # [E, 1]
 
         # Create message input [h_i, h_j, ||x_i - x_j||²]
         message_input = torch.cat([h_i, h_j, dist_normalized], dim=1)  # [E, 2*hidden_node_dim + 1]
@@ -540,19 +541,26 @@ class EGNN(torch.nn.Module):
     Full E(n) Equivariant Graph Neural Network for Boids
     """
     
-    def __init__(self, hidden_node_dim=64, hidden_edge_dim=32, num_layers=4, num_nodes=25, width=1000.0, height=1000.0):
+    def __init__(self, hidden_node_dim=5, hidden_edge_dim=12, num_layers=4, num_nodes=25, width=1000.0, height=1000.0, weight_sharing=False):
         super(EGNN, self).__init__()
         
         # Store dims
         self.hidden_node_dim = hidden_node_dim
+        self.num_layers = num_layers
+        self.weight_sharing = weight_sharing
         
         # EGNN layers
-        self.layers = torch.nn.ModuleList([
-            EGNNLayer(hidden_node_dim, hidden_edge_dim, width=width, height=height) 
-            for _ in range(num_layers)
-        ])
+        if self.weight_sharing:
+            # Create a single shared layer and reference it num_layers times for logging consistency
+            shared_layer = EGNNLayer(hidden_node_dim, hidden_edge_dim, width=width, height=height)
+            self.layers = torch.nn.ModuleList([shared_layer for _ in range(num_layers)])
+        else:
+            self.layers = torch.nn.ModuleList([
+                EGNNLayer(hidden_node_dim, hidden_edge_dim, width=width, height=height) 
+                for _ in range(num_layers)
+            ])
         
-    def forward(self, data):
+    def forward(self, data, trace_node_index=None):
         """
         Args:
             data: PyG data object with:
@@ -574,10 +582,10 @@ class EGNN(torch.nn.Module):
             
             # Apply EGNN layers, always using the initial velocities
             self.last_layer_stats = []
+            self.last_layer_traces = [] if trace_node_index is not None else None
             for i, layer in enumerate(self.layers):
                 with timer.time(f"layer_{i}"):
-                    nodes, pos, vel_current = layer(nodes, pos, vel_init, data.edge_index)
-                    # Note: We get vel_current from each layer but always pass vel_init to the next layer
+                    nodes, pos, vel_current = layer(nodes, pos, vel_init, data.edge_index, trace_node_index=trace_node_index)
                     # Collect lightweight per-layer stats for visibility
                     stats = {
                         "messages_abs_mean": float(getattr(layer, "_last_messages_abs_mean", torch.tensor(0.0)).detach().item()),
@@ -585,6 +593,9 @@ class EGNN(torch.nn.Module):
                         "vel_update_norm_mean": float(getattr(layer, "_last_vel_update_norm_mean", torch.tensor(0.0)).detach().item()),
                     }
                     self.last_layer_stats.append(stats)
+                    if self.last_layer_traces is not None:
+                        trace = getattr(layer, "_last_trace", None)
+                        self.last_layer_traces.append(trace)
             
             # Calculate position delta from initial positions
             pos_delta = pos - data.x[:, :2]  # [N, 2] - difference from input positions
@@ -684,7 +695,8 @@ class AR_EGNN_Dataset(InMemoryDataset):
     
 
 class Trainer:
-    def __init__(self, model, train_dataset, validation_dataset, batch_size=1, lr=0.0001, epochs=100, loss_fn=torch.nn.MSELoss(), model_name= "Model.pt", grad_clip_max_norm=1.0):
+    def __init__(self, model, train_dataset, validation_dataset, batch_size=1, lr=0.0001, epochs=100, loss_fn=torch.nn.MSELoss(), model_name= "Model.pt", grad_clip_max_norm=1.0,
+                 trace_enabled=True, trace_dataset_index=0, trace_boid_index=1):
         """
         Simple Trainer class to train a PyTorch (geometric) model on a dataset.
 
@@ -706,6 +718,11 @@ class Trainer:
         self.loss_fn = loss_fn
         self.model_name = model_name
         self.grad_clip_max_norm = grad_clip_max_norm
+        # Tracing configuration
+        self.trace_enabled = trace_enabled
+        self.trace_dataset_index = trace_dataset_index
+        self.trace_boid_index = trace_boid_index
+        self.trace_records = []  # list of per-epoch dicts
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("Using device:", self.device)
@@ -713,7 +730,7 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         # TensorBoard writer
         os.makedirs("../../runs", exist_ok=True)
-        self.writer = SummaryWriter(log_dir=f"../../runs/egnn_{int(time.time())}")
+        self.writer = SummaryWriter(log_dir=f"../../runs/egnn_lr_001_{int(time.time())}")
 
         self.train_loader = self.make_data_loader(self.train_dataset)
         self.validation_loader = self.make_data_loader(self.validation_dataset, shuffle=False)
@@ -843,6 +860,148 @@ class Trainer:
                         for li in range(len(layer_sums_val)):
                             for k, v in layer_sums_val[li].items():
                                 self.writer.add_scalar(f"val/layer_{li}/{k}", v / num_val_batches, epoch)
+
+                    # Per-epoch tracing on a fixed validation sample and boid
+                    if self.trace_enabled:
+                        with torch.no_grad():
+                            try:
+                                trace_data = self.validation_dataset[self.trace_dataset_index]
+                                trace_data = trace_data.to(self.device)
+                                boid_idx = int(self.trace_boid_index)
+                                # Clamp boid index to range
+                                boid_idx = max(0, min(boid_idx, trace_data.x.shape[0] - 1))
+                                # Run forward with tracing enabled
+                                trace_out = self.model(trace_data, trace_node_index=boid_idx)
+                                # Compute predictions and ground truth
+                                input_pos = trace_data.x[boid_idx, :2].detach().to('cpu')
+                                input_vel = trace_data.x[boid_idx, 2:].detach().to('cpu')
+                                pred_delta = trace_out[boid_idx, :2].detach().to('cpu')
+                                pred_pos = (input_pos + pred_delta)
+                                pred_vel = trace_out[boid_idx, 2:].detach().to('cpu')
+                                target_delta = trace_data.y[boid_idx, :2].detach().to('cpu')
+                                target_pos = (input_pos + target_delta)
+                                target_vel = trace_data.y[boid_idx, 2:].detach().to('cpu')
+                                # Differences for clarity
+                                pos_pred_minus_input = pred_pos - input_pos           # == pred_delta
+                                pos_pred_minus_target = pred_pos - target_pos         # position error
+                                pos_target_minus_input = target_pos - input_pos       # == target_delta
+                                vel_pred_minus_input = pred_vel - input_vel
+                                vel_pred_minus_target = pred_vel - target_vel         # velocity error
+                                vel_target_minus_input = target_vel - input_vel
+                                # Per-boid losses (MSE over 2 components)
+                                pos_loss_boid = float(((pred_delta - target_delta) ** 2).mean())
+                                vel_loss_boid = float(((pred_vel - target_vel) ** 2).mean())
+                                # Collect per-layer traces
+                                layer_traces = []
+                                for li, tr in enumerate(getattr(self.model, 'last_layer_traces', []) or []):
+                                    if tr is None:
+                                        layer_traces.append(None)
+                                    else:
+                                        layer_traces.append({
+                                            'pos_in': tr['pos_in'].clone(),
+                                            'vel_node_update': tr['vel_node_update'].clone(),
+                                            'vel_message_update': tr['vel_message_update'].clone(),
+                                            'vel_new': tr['vel_new'].clone(),
+                                            'pos_out': tr['pos_out'].clone(),
+                                        })
+                                # Store record
+                                record = {
+                                    'epoch': epoch,
+                                    'boid_index': boid_idx,
+                                    'input_pos': input_pos.clone(),
+                                    'input_vel': input_vel.clone(),
+                                    'pred_pos': pred_pos.clone(),
+                                    'pred_vel': pred_vel.clone(),
+                                    'target_pos': target_pos.clone(),
+                                    'target_vel': target_vel.clone(),
+                                    'pos_pred_minus_input': pos_pred_minus_input.clone(),
+                                    'pos_pred_minus_target': pos_pred_minus_target.clone(),
+                                    'pos_target_minus_input': pos_target_minus_input.clone(),
+                                    'vel_pred_minus_input': vel_pred_minus_input.clone(),
+                                    'vel_pred_minus_target': vel_pred_minus_target.clone(),
+                                    'vel_target_minus_input': vel_target_minus_input.clone(),
+                                    'pos_loss': pos_loss_boid,
+                                    'vel_loss': vel_loss_boid,
+                                    'layer_traces': layer_traces,
+                                }
+                                self.trace_records.append(record)
+                                # Console summary (readable block)
+                                sep = "-" * 72
+                                print(sep)
+                                print(f"Trace | epoch={epoch} boid={boid_idx}")
+                                print("Inputs : pos=({:7.3f},{:7.3f})  vel=({:7.3f},{:7.3f})".format(input_pos[0], input_pos[1], input_vel[0], input_vel[1]))
+                                print("Pred   : pos=({:7.3f},{:7.3f})  vel=({:7.3f},{:7.3f})".format(pred_pos[0], pred_pos[1], pred_vel[0], pred_vel[1]))
+                                print("Target : pos=({:7.3f},{:7.3f})  vel=({:7.3f},{:7.3f})".format(target_pos[0], target_pos[1], target_vel[0], target_vel[1]))
+                                print("Diffs  : pos(pred-input)=({:7.3f},{:7.3f}) ||.||={:7.3f}  pos(pred-target)=({:7.3f},{:7.3f}) ||.||={:7.3f}".format(
+                                    pos_pred_minus_input[0], pos_pred_minus_input[1], pos_pred_minus_input.norm(),
+                                    pos_pred_minus_target[0], pos_pred_minus_target[1], pos_pred_minus_target.norm()))
+                                print("         vel(pred-input)=({:7.3f},{:7.3f}) ||.||={:7.3f}  vel(pred-target)=({:7.3f},{:7.3f}) ||.||={:7.3f}".format(
+                                    vel_pred_minus_input[0], vel_pred_minus_input[1], vel_pred_minus_input.norm(),
+                                    vel_pred_minus_target[0], vel_pred_minus_target[1], vel_pred_minus_target.norm()))
+                                print("         pos(target-input)=({:7.3f},{:7.3f}) ||.||={:7.3f}  vel(target-input)=({:7.3f},{:7.3f}) ||.||={:7.3f}".format(
+                                    pos_target_minus_input[0], pos_target_minus_input[1], pos_target_minus_input.norm(),
+                                    vel_target_minus_input[0], vel_target_minus_input[1], vel_target_minus_input.norm()))
+                                print("Loss   : pos_mse={:8.6f}  vel_mse={:8.6f}".format(pos_loss_boid, vel_loss_boid))
+                                print("Layers :")
+                                for li, tr in enumerate(layer_traces):
+                                    if tr is None:
+                                        print(f"  L{li}: trace unavailable")
+                                        continue
+                                    vnu = tr['vel_node_update']
+                                    vmu = tr['vel_message_update']
+                                    vnew = tr['vel_new']
+                                    pin = tr['pos_in']
+                                    pout = tr['pos_out']
+                                    print("  L{:d}: pos_in=({:7.3f},{:7.3f})  pos_out=({:7.3f},{:7.3f})".format(li, pin[0], pin[1], pout[0], pout[1]))
+                                    print("       : vel_node_update=({:7.3f},{:7.3f})  vel_message_update=({:7.3f},{:7.3f})  vel_new=({:7.3f},{:7.3f})".format(
+                                        vnu[0], vnu[1], vmu[0], vmu[1], vnew[0], vnew[1]))
+                                print(sep)
+                                # TensorBoard logging (trace scalars)
+                                self.writer.add_scalar("trace/input_pos_x", float(input_pos[0]), epoch)
+                                self.writer.add_scalar("trace/input_pos_y", float(input_pos[1]), epoch)
+                                self.writer.add_scalar("trace/pred_pos_x", float(pred_pos[0]), epoch)
+                                self.writer.add_scalar("trace/pred_pos_y", float(pred_pos[1]), epoch)
+                                self.writer.add_scalar("trace/target_pos_x", float(target_pos[0]), epoch)
+                                self.writer.add_scalar("trace/target_pos_y", float(target_pos[1]), epoch)
+                                # Log diffs
+                                self.writer.add_scalar("trace/pos_pred_minus_input_x", float(pos_pred_minus_input[0]), epoch)
+                                self.writer.add_scalar("trace/pos_pred_minus_input_y", float(pos_pred_minus_input[1]), epoch)
+                                self.writer.add_scalar("trace/pos_pred_minus_input_norm", float(pos_pred_minus_input.norm()), epoch)
+                                self.writer.add_scalar("trace/pos_pred_minus_target_x", float(pos_pred_minus_target[0]), epoch)
+                                self.writer.add_scalar("trace/pos_pred_minus_target_y", float(pos_pred_minus_target[1]), epoch)
+                                self.writer.add_scalar("trace/pos_pred_minus_target_norm", float(pos_pred_minus_target.norm()), epoch)
+                                self.writer.add_scalar("trace/pos_target_minus_input_x", float(pos_target_minus_input[0]), epoch)
+                                self.writer.add_scalar("trace/pos_target_minus_input_y", float(pos_target_minus_input[1]), epoch)
+                                self.writer.add_scalar("trace/pos_target_minus_input_norm", float(pos_target_minus_input.norm()), epoch)
+                                self.writer.add_scalar("trace/input_vel_x", float(input_vel[0]), epoch)
+                                self.writer.add_scalar("trace/input_vel_y", float(input_vel[1]), epoch)
+                                self.writer.add_scalar("trace/pred_vel_x", float(pred_vel[0]), epoch)
+                                self.writer.add_scalar("trace/pred_vel_y", float(pred_vel[1]), epoch)
+                                self.writer.add_scalar("trace/target_vel_x", float(target_vel[0]), epoch)
+                                self.writer.add_scalar("trace/target_vel_y", float(target_vel[1]), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_target_x", float(vel_pred_minus_target[0]), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_target_y", float(vel_pred_minus_target[1]), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_target_norm", float(vel_pred_minus_target.norm()), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_input_x", float(vel_pred_minus_input[0]), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_input_y", float(vel_pred_minus_input[1]), epoch)
+                                self.writer.add_scalar("trace/vel_pred_minus_input_norm", float(vel_pred_minus_input.norm()), epoch)
+                                self.writer.add_scalar("trace/vel_target_minus_input_x", float(vel_target_minus_input[0]), epoch)
+                                self.writer.add_scalar("trace/vel_target_minus_input_y", float(vel_target_minus_input[1]), epoch)
+                                self.writer.add_scalar("trace/vel_target_minus_input_norm", float(vel_target_minus_input.norm()), epoch)
+                                # Log per-boid losses
+                                self.writer.add_scalar("trace/pos_loss", pos_loss_boid, epoch)
+                                self.writer.add_scalar("trace/vel_loss", vel_loss_boid, epoch)
+                                for li, tr in enumerate(layer_traces):
+                                    if tr is None:
+                                        continue
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_node_update_x", float(tr['vel_node_update'][0]), epoch)
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_node_update_y", float(tr['vel_node_update'][1]), epoch)
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_message_update_x", float(tr['vel_message_update'][0]), epoch)
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_message_update_y", float(tr['vel_message_update'][1]), epoch)
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_new_x", float(tr['vel_new'][0]), epoch)
+                                    self.writer.add_scalar(f"trace/layer_{li}/vel_new_y", float(tr['vel_new'][1]), epoch)
+                            except Exception as e:
+                                print(f"Tracing failed at epoch {epoch}: {e}")
                 
                 # Print timing report after each epoch
                 if epoch == 0:  # Print detailed timing for first epoch
@@ -881,7 +1040,7 @@ class Trainer:
 print("=== Training EGNN Model ===")
 
 # Create and train EGNN model
-egnn_model = EGNN(hidden_node_dim=64, hidden_edge_dim=128, num_layers=4, num_nodes=25)
+egnn_model = EGNN(hidden_node_dim=6, hidden_edge_dim=12, num_layers=4, num_nodes=25, weight_sharing=True)
 
 # Create datasets
 train_dataset = AR_EGNN_Dataset(
