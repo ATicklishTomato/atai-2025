@@ -2,4 +2,6 @@ data/CFD/grid/concat/*
 .venv
 .idea
 data/boids/processed/*
+data/boids_sensitivity/processed/*
 **/.ipynb_checkpoints/*
+**/output/*
