@@ -5,3 +5,4 @@ data/boids/processed/*
 data/boids_sensitivity/processed/*
 **/.ipynb_checkpoints/*
 **/output/*
+**/wandb.login
