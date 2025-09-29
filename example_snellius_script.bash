@@ -14,7 +14,7 @@ module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
 source .venv/bin/activate # Activate virtual environment
 
-pip install -r requirements_ass2.txt
+pip install -r requirements_assignment2.txt
 
 #echo 'Starting new experiment';
 python run.py
