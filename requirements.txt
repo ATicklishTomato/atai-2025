@@ -1,3 +1,4 @@
+scikit-learn
 ipython==9.5.0
 matplotlib==3.10.6
 notebook==7.4.5
@@ -5,4 +6,7 @@ notebook==7.4.5
 torch
 torchvision
 torch_geometric
+torchdiffeq
+numpy
 tqdm==4.67.1
+pandas
