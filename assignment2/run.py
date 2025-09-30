@@ -69,10 +69,10 @@ def parse_args():
 
 def get_model(args):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_model import CFDModel
-        model = CFDModel(args)
+        from modules.cfd_model import CFDModel
+        model = CFDModel()
     elif args.problem == 'boids':
-        from assignment2.modules.boids_model import BoidsModel
+        from modules.boids_model import BoidsModel
         model = BoidsModel(args)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
@@ -80,20 +80,20 @@ def get_model(args):
 
 def get_dataloaders(args):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_dataloaders import get_cfd_dataloaders
-        return get_cfd_dataloaders(args)
+        from modules.cfd_dataloaders import get_cfd_dataloaders
+        return get_cfd_dataloaders()
     elif args.problem == 'boids':
-        from assignment2.modules.boids_dataloaders import get_boids_dataloaders
+        from modules.boids_dataloaders import get_boids_dataloaders
         return get_boids_dataloaders(args)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
 def get_trainer(args, model, train_dataloader, val_dataloader):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_trainer import CFDTrainer
+        from modules.cfd_trainer import CFDTrainer
         return CFDTrainer(args, model, train_dataloader, val_dataloader)
     elif args.problem == 'boids':
-        from assignment2.modules.boids_trainer import BoidsTrainer
+        from modules.boids_trainer import BoidsTrainer
         return BoidsTrainer(args, model, train_dataloader, val_dataloader)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
