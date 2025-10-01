@@ -3,13 +3,17 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CFDDataset(Dataset):
     # TODO: Implement the CFD dataset class
-    def __init__(self, filenames, flip_augmentation=False, timesample=1, bundle=1):
+    def __init__(self, filenames, flip_augmentation=False, automask=True, timesample=1, bundle=1):
         self.sequences = []
         self.index_map = []
         self.flip_augmentation = flip_augmentation
+        self.automask = automask
         self.bundle = bundle
 
         # coordinates
@@ -23,6 +27,9 @@ class CFDDataset(Dataset):
         radius = 0.5
         squared_distance = ((self.coords - center) ** 2).sum(dim=0)
         self.mask = (squared_distance < radius**2).unsqueeze(0).cuda()  # [1, 64, 128]
+
+        # Copy mask bundle times to get [1, bundle, H, W]
+        self.mask = self.mask.repeat(1, bundle, 1, 1) # [1, bundle, H, W]
 
         # load sequences
         for seq_idx, filename in enumerate(filenames):
@@ -42,25 +49,30 @@ class CFDDataset(Dataset):
 
         # time-bundled input [bundle, C, H, W]
         input_seq = seq[t:t + self.bundle]
-        target = seq[t + self.bundle]  # predict next frame
+        # Put channels first, such that [C, bundle, H, W]
+        input_seq = np.transpose(input_seq, (1, 0, 2, 3))
+        # target = seq[t + self.bundle]  # predict next frame
 
         # optional flip augmentation
         if self.flip_augmentation and np.random.rand() > 0.5:
             input_seq = np.stack([self.flip(x) for x in input_seq], axis=0)
-            target = self.flip(target)
+            # target = self.flip(target)
 
-        return (
-            self.mask,
-            self.coords,
-            torch.tensor(input_seq, dtype=torch.float32),  # [bundle, C, H, W]
-            torch.tensor(target, dtype=torch.float32)      # [C, H, W]
-        )
+        input_seq = torch.tensor(input_seq, dtype=torch.float32).cuda()  # [C, bundle, H, W]
+        if self.automask:
+            input_seq = torch.cat([self.mask, input_seq], dim=0) # [C+1, bundle, H, W]
+            return input_seq
+        else:
+            return (
+                self.mask, # [bundle, 1, H, W]
+                input_seq, # [C, bundle, H, W]
+                # torch.tensor(target, dtype=torch.float32)      # [C, H, W]
+            )
 
     def get_trajectory(self, seq_idx):
         seq = self.sequences[seq_idx]
         return (
             self.mask.unsqueeze(0),
-            self.coords.unsqueeze(0),
             torch.tensor(seq, dtype=torch.float32)  # [T, C, H, W]
         )
 
@@ -70,6 +82,7 @@ class CFDDataset(Dataset):
         return x
 
 def preprocess_files():
+    logger.info('Preprocessing files')
     if not os.path.exists("./data/cfd/processed/"):
         os.makedirs("./data/cfd/processed/", exist_ok=True)
     if os.listdir("./data/cfd/processed/") != []:
@@ -86,7 +99,7 @@ def preprocess_files():
 
 
 
-def get_cfd_dataloaders(dt=20, bundle=5, batch_size=1, train_files=None, val_files=None):
+def get_cfd_dataloaders(dt=20, bundle=20, batch_size=1, train_files=None, val_files=None):
     if train_files is None or len(train_files) == 0:
         train_files = [
             './data/cfd/processed/uvp_grid_Re100.npy',
@@ -103,10 +116,13 @@ def get_cfd_dataloaders(dt=20, bundle=5, batch_size=1, train_files=None, val_fil
 
     preprocess_files()
 
+    logger.info('Building datasets')
     train_dataset = CFDDataset(train_files, flip_augmentation=False, timesample=dt, bundle=bundle)
     val_dataset = CFDDataset(val_files, flip_augmentation=False, timesample=dt, bundle=bundle)
 
+    logger.info('Building dataloaders')
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
+    logger.info('Finished loading data')
     return train_loader, val_loader
