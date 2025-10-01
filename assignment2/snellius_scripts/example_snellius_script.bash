@@ -9,12 +9,12 @@
 
 module purge
 module load 2023
-module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
+module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1 # Includes most dependencies
 
 
 source .venv/bin/activate # Activate virtual environment
 
-pip install -r requirements_assignment2.txt
+pip install -r requirements.txt # Install leftover dependencies
 
 #echo 'Starting new experiment';
 python run.py

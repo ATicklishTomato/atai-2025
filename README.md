@@ -15,6 +15,9 @@ pip install -r requirements.txt
 
 ## Snellius supercomputer usage
 To run the code on the Snellius supercomputer, you need to copy the assignment2 directory to the supercomputer using `scp`.
+```bash
+scp -r assignment2 <username>@snellius.surf.nl:~/.
+```
 
 **IMPORTANT:** Do not forget to include a `wandb.login` file in the project root with your Weights and Biases API key. Using the CLI flag on Snellius isn't advised.
 

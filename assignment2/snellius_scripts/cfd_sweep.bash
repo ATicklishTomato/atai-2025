@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=5:00:00
+#SBATCH --time=3:00:00
 #SBATCH -p gpu_mig
 #SBATCH -N 1
 #SBATCH --tasks-per-node 1
@@ -17,5 +17,4 @@ source .venv/bin/activate # Activate virtual environment
 pip install -r requirements.txt # Install leftover dependencies
 
 #echo 'Starting new experiment';
-cd ../ # Ensure we're in the right directory
-python run.py --sweep --sweep_runs 50
+python run.py --sweep
