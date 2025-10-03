@@ -171,6 +171,12 @@ def main():
         "no_save_figures": args.no_save_figures,
     }
 
+    if args.bundle_size % 4 != 0:
+        logger.error("Bundle size must be divisible by 4 for the CFD model. Exiting.")
+        # This is because the CFD model pools the input 2 times and then upscales again. If the bundle size is not divisible by 4,
+        # the dimensions will not match up for the skip connections because of rounding during pooling.
+        raise ValueError("Bundle size must be divisible by 4 for the CFD model.")
+
     if args.wandb_api_key is not None:
         wandb.login(key=args.wandb_api_key)
     elif os.path.exists('wandb.login'):
@@ -187,7 +193,7 @@ def main():
                 'lr': {'values': [1e-5, 1e-4, 1e-3]},
                 'sigma': {'min': 0.05, 'max': 0.2},
                 'batch_size': {'values': [4, 8, 16]},
-                'bundle_size': {'values': [10, 20, 30]},
+                'bundle_size': {'values': [16, 20, 40]},
                 'layer_size': {'values': [64, 128, 256]}
             }
         }
