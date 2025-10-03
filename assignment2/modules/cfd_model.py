@@ -53,7 +53,7 @@ class CFDModel(nn.Module):
         # x: (batch, B, C, H, W), t: (batch, B, 1, 1, 1) in [0,1]
         logger.debug(f"Forward pass with x shape: {x.shape} and t shape: {t.shape}")
         batch_size, C, B, H, W = x.shape
-        # expand t to (batch, B,1,H,W)
+        # expand t to (batch, 1, B, H, W)
         t_map = t.expand(batch_size, 1, B, H, W)
         xt = torch.cat([x, t_map], dim=1)  # concat along channel
         # encoder

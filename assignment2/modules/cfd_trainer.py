@@ -31,7 +31,7 @@ class CFDTrainer():
 
         for epoch in range(self.epochs):
             self.model.train()
-            losses = torch.zeros(len(self.train_dataloader))
+            train_losses = torch.zeros(len(self.train_dataloader))
             if self.use_tqdm:
                 loader = tqdm(enumerate(self.train_dataloader), total=len(self.train_dataloader), leave=False, desc=f"Training epoch {epoch+1}/{self.epochs}")
             else:
@@ -49,15 +49,13 @@ class CFDTrainer():
                 logger.debug(f"Computing training loss for batch {index} with x_t shape: {x_t.shape} and u shape: {u.shape}")
                 loss = self.loss_fn(self.model(t=t, x=x_t), u)
                 loss.backward()
-                losses[index] = loss.item()
+                train_losses[index] = loss.item()
                 self.optimizer.step()
-
-            wandb.log({"train_avg_loss": torch.mean(losses)})
 
             # Validation step
             self.model.eval()
             with torch.no_grad():
-                losses = torch.zeros(len(self.val_dataloader))
+                val_losses = torch.zeros(len(self.val_dataloader))
                 if self.use_tqdm:
                     loader = tqdm(enumerate(self.val_dataloader), total=len(self.val_dataloader), leave=False, desc=f"Validation epoch {epoch+1}/{self.epochs}")
                 else:
@@ -73,9 +71,10 @@ class CFDTrainer():
 
                     logger.debug(f"Computing validation loss for batch {index} with x_t shape: {x_t.shape} and u shape: {u.shape}")
                     loss = self.loss_fn(self.model(t=t, x=x_t), u)
-                    losses[index] = loss.item()
+                    val_losses[index] = loss.item()
 
-                wandb.log({"val_avg_loss": torch.mean(losses)})
+            wandb.log({"train_avg_loss": torch.mean(train_losses),
+                       "val_avg_loss": torch.mean(val_losses)})
 
 
             if epoch % (self.epochs // 10) == 0 and epoch > 0:
@@ -85,7 +84,7 @@ class CFDTrainer():
                     wandb.save(f"./models/cfd_model_epoch{epoch}.pth")
                     logger.info(f"Model checkpoint saved to Weights and Biases for epoch {epoch}")
 
-            logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(losses):.6f}, Val Loss: {torch.mean(losses):.6f}")
+            logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(val_losses):.6f}, Val Loss: {torch.mean(val_losses):.6f}")
 
         logger.info("Training completed.")
         if self.save:
