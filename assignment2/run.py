@@ -3,8 +3,10 @@ from argparse import ArgumentParser
 import logging
 from datetime import datetime
 import torch
-
 import wandb
+
+# Change wandb logging directory so IDEs don't confuse log directory for importable package
+os.environ['WANDB_DIR'] = './wandb_logs'
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +24,20 @@ def parse_args():
                         'any arguments passed related to sweep parameters')
     parser.add_argument('--sweep_runs',
                         type=int,
-                        default=25,
-                        help='Number of random runs to perform in the hyperparameter sweep. Default is 25')
+                        default=10,
+                        help='Number of random runs to perform in the hyperparameter sweep. Default is 10')
     parser.add_argument('--epochs',
                         type=int,
-                        default=100,
-                        help='Number of epochs to train for. Default is 100')
+                        default=400,
+                        help='Number of epochs to train for. Default is 400')
+    parser.add_argument('--patience',
+                        type=int,
+                        default=20,
+                        help='Number of epochs with no improvement on validation loss before stopping training early. Default is 20')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=8,
-                        help='Batch size for training. Default is 8')
+                        default=4,
+                        help='Batch size for training. Default is 4')
     parser.add_argument('--lr',
                         type=float,
                         default=1e-4,
@@ -190,11 +196,10 @@ def main():
             'method': 'random',
             'metric': {'name': 'val_avg_loss', 'goal': 'minimize'},
             'parameters': {
-                'lr': {'values': [1e-5, 1e-4, 1e-3]},
-                'sigma': {'min': 0.05, 'max': 0.2},
-                'batch_size': {'values': [4, 8, 16]},
-                'bundle_size': {'values': [16, 20, 40]},
-                'layer_size': {'values': [64, 128, 256]}
+                'lr': {'values': [1e-6, 1e-5, 1e-4]},
+                'sigma': {'min': 0.01, 'max': 0.2},
+                'bundle_size': {'values': [16, 20, 24]},
+                'layer_size': {'values': [128, 256]}
             }
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)

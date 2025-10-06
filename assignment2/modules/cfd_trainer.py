@@ -22,12 +22,15 @@ class CFDTrainer():
         self.sigma = args.sigma  # noise level
         self.use_tqdm = args.use_tqdm
         self.save = args.save
+        self.patience = args.patience
 
 
     def train(self):
         # Implement the training loop
         wandb.watch(self.model, log='all')
         logger.info("Model watched by Weights and Biases")
+        best_val_loss = float('inf')
+        patience = self.patience
 
         for epoch in range(self.epochs):
             self.model.train()
@@ -85,6 +88,15 @@ class CFDTrainer():
                     logger.info(f"Model checkpoint saved to Weights and Biases for epoch {epoch}")
 
             logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(val_losses):.6f}, Val Loss: {torch.mean(val_losses):.6f}")
+            # Early stopping
+            if torch.mean(val_losses) < best_val_loss:
+                best_val_loss = torch.mean(val_losses)
+                patience = self.patience
+            else:
+                patience -= 1
+                if patience <= 0:
+                    logger.info("Early stopping triggered.")
+                    break
 
         logger.info("Training completed.")
         if self.save:
