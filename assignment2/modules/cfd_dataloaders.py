@@ -53,11 +53,18 @@ class CFDDataset(Dataset):
         seq = self.sequences[seq_idx]
 
         # time-bundled data [F, C, W, H]
-        target_sequence = seq[t:t + self.predict_frames]
-        history_sequence = seq[t-self.history_frames:t]
+        original_target_sequence = np.array(seq[t:t + self.predict_frames])  # [F, C, W, H]
+        original_history_sequence = np.array(seq[t-self.history_frames:t])
         # Put channels first, such that [C, F, W, H]
-        target_sequence = np.transpose(target_sequence, (1, 0, 2, 3))  # [C, F, W, H]
-        history_sequence = np.transpose(history_sequence, (1, 0, 2, 3))  # [C, F, W, H]
+        target_sequence = np.transpose(original_target_sequence, (1, 0, 2, 3))  # [C, F, W, H]
+        history_sequence = np.transpose(original_history_sequence, (1, 0, 2, 3))  # [C, F, W, H]
+
+        for channel in range(target_sequence.shape[0]):
+            for frame in range(target_sequence.shape[1]):
+                target = target_sequence[channel, frame]
+                true = original_target_sequence[frame, channel]
+                assert np.array_equal(target, true), f"Data mismatch at seq {seq_idx}, time {t}, channel {channel}, frame {frame}"
+
 
         # Resize masks to respective [F, 1, W, H] sizes for history and target sequences
         history_mask = self.mask.repeat(1, self.history_frames, 1, 1)
