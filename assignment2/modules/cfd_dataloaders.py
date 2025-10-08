@@ -8,13 +8,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 class CFDDataset(Dataset):
-    # TODO: Implement the CFD dataset class
-    def __init__(self, filenames, flip_augmentation=False, automask=True, timesample=1, bundle=1):
+    def __init__(self, filenames, flip_augmentation=False, timesample=1, predict_frames=1, history_frames=5):
         self.sequences = []
         self.index_map = []
         self.flip_augmentation = flip_augmentation
-        self.automask = automask
-        self.bundle = bundle
+        self.predict_frames = predict_frames
+        self.history_frames = history_frames
 
         # coordinates
         self.coordsy = np.linspace(-5, 5, 64, endpoint=True)
@@ -26,59 +25,70 @@ class CFDDataset(Dataset):
         center = torch.tensor([-5.0, 0.0], device=self.coords.device).view(2, 1, 1)
         radius = 0.5
         squared_distance = ((self.coords - center) ** 2).sum(dim=0)
-        self.mask = (squared_distance < radius**2).unsqueeze(0).cuda()  # [1, 64, 128]
-
-        # Copy mask bundle times to get [1, bundle, H, W]
-        self.mask = self.mask.repeat(1, bundle, 1, 1) # [1, bundle, H, W]
+        self.mask = (squared_distance < radius**2).unsqueeze(0).cuda()  # [C, W, H]
 
         # load sequences
         for seq_idx, filename in enumerate(filenames):
-            data = np.load(filename)  # shape [T, C, H, W]
+            data = np.load(filename)  # shape [F, C, H, W]
             data = data[::timesample]  # subsample in time
             self.sequences.append(data)
-            T = data.shape[0]
-            # only keep indices where bundle+1 frames are available
-            self.index_map.extend([(seq_idx, t) for t in range(T - bundle)])
+            total_frames = data.shape[0]
+            # only keep indices where we have enough history and prediction frames
+            self.index_map.extend([(seq_idx, t) for t in range(history_frames, total_frames - predict_frames)])
 
     def __len__(self):
         return len(self.index_map)
 
     def __getitem__(self, idx):
+        """ Prepares and returns a data sample.
+        @param idx: Index of the sample to retrieve.
+        @return: A tuple containing:
+        - history_mask: Mask for the history frames [1, F, W, H]
+        - history_sequence: History frames [C, F, W, H]
+        - target_mask: Mask for the target frames [1, F, W, H]
+        - target_sequence: Target frames [C, F, W, H]
+
+        """
         seq_idx, t = self.index_map[idx]
         seq = self.sequences[seq_idx]
 
-        # time-bundled input [bundle, C, H, W]
-        input_seq = seq[t:t + self.bundle]
-        # Put channels first, such that [C, bundle, H, W]
-        input_seq = np.transpose(input_seq, (1, 0, 2, 3))
-        # target = seq[t + self.bundle]  # predict next frame
+        # time-bundled data [F, C, W, H]
+        target_sequence = seq[t:t + self.predict_frames]
+        history_sequence = seq[t-self.history_frames:t]
+        # Put channels first, such that [C, F, W, H]
+        target_sequence = np.transpose(target_sequence, (1, 0, 2, 3))  # [C, F, W, H]
+        history_sequence = np.transpose(history_sequence, (1, 0, 2, 3))  # [C, F, W, H]
 
-        # optional flip augmentation
+        # Resize masks to respective [F, 1, W, H] sizes for history and target sequences
+        history_mask = self.mask.repeat(1, self.history_frames, 1, 1)
+        target_mask = self.mask.repeat(1, self.predict_frames, 1, 1)
+
+
         if self.flip_augmentation and np.random.rand() > 0.5:
-            input_seq = np.stack([self.flip(x) for x in input_seq], axis=0)
-            # target = self.flip(target)
+            history_sequence = self.flip(history_sequence)
+            target_sequence = self.flip(target_sequence)
+            history_mask = self.flip(history_mask)
+            target_mask = self.flip(target_mask)
 
-        input_seq = torch.tensor(input_seq, dtype=torch.float32).cuda()  # [C, bundle, H, W]
-        if self.automask:
-            input_seq = torch.cat([self.mask, input_seq], dim=0) # [C+1, bundle, H, W]
-            return input_seq
-        else:
-            return (
-                self.mask, # [bundle, 1, H, W]
-                input_seq, # [C, bundle, H, W]
-                # torch.tensor(target, dtype=torch.float32)      # [C, H, W]
-            )
+        # Make tensors
+        history_sequence = torch.tensor(history_sequence, dtype=torch.float32)
+        target_sequence = torch.tensor(target_sequence, dtype=torch.float32)
+
+        return history_mask, history_sequence, target_mask, target_sequence
+
 
     def get_trajectory(self, seq_idx):
         seq = self.sequences[seq_idx]
-        return (
-            self.mask.unsqueeze(0),
-            torch.tensor(seq, dtype=torch.float32)  # [T, C, H, W]
-        )
+        seq = np.transpose(seq, (1, 0, 2, 3))  # [C, F, W, H]
+        seq = torch.tensor(seq, dtype=torch.float32)
+        mask = self.mask.repeat(1, self.history_frames, 1, 1) # [1, F, W, H]
+        return mask, seq
+
 
     def flip(self, x):
-        x = np.flip(x, axis=2).copy()
-        x[1] *= -1
+        """ Flips the input tensor horizontally and negates the x-component of the velocity."""
+        x = np.flip(x, axis=3)  # flip width dimension
+        x[1] *= -1 # negate x-velocity
         return x
 
 def preprocess_files():
@@ -99,7 +109,7 @@ def preprocess_files():
 
 
 
-def get_cfd_dataloaders(dt=20, bundle=20, batch_size=1, train_files=None, val_files=None):
+def get_cfd_dataloaders(dt=20, predict_frames=20, history_frames=5, batch_size=1, train_files=None, val_files=None):
     if train_files is None or len(train_files) == 0:
         train_files = [
             './data/cfd/processed/uvp_grid_Re100.npy',
@@ -117,8 +127,10 @@ def get_cfd_dataloaders(dt=20, bundle=20, batch_size=1, train_files=None, val_fi
     preprocess_files()
 
     logger.info('Building datasets')
-    train_dataset = CFDDataset(train_files, flip_augmentation=False, timesample=dt, bundle=bundle)
-    val_dataset = CFDDataset(val_files, flip_augmentation=False, timesample=dt, bundle=bundle)
+    train_dataset = CFDDataset(train_files, flip_augmentation=False, timesample=dt, predict_frames=predict_frames,
+                                history_frames=history_frames)
+    val_dataset = CFDDataset(val_files, flip_augmentation=False, timesample=dt, predict_frames=predict_frames,
+                                history_frames=history_frames)
 
     logger.info('Building dataloaders')
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)

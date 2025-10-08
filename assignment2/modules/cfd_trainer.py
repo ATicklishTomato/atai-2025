@@ -13,8 +13,6 @@ class CFDTrainer():
         self.epochs = args.epochs
         self.device = args.device
         self.model = model.to(self.device)
-        self.skip_train = args.skip_train
-        self.skip_val = args.skip_test
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.loss_fn = nn.MSELoss()
@@ -39,18 +37,28 @@ class CFDTrainer():
                 loader = tqdm(enumerate(self.train_dataloader), total=len(self.train_dataloader), leave=False, desc=f"Training epoch {epoch+1}/{self.epochs}")
             else:
                 loader = enumerate(self.train_dataloader)
-            for index, batch in loader:
-                batch = batch.to(self.device)
-                x_1 = batch # (batch, C, bundle, H, W)
-                x_0 = torch.randn_like(x_1).to(self.device)
-                t = torch.rand(len(x_1), 1).to(self.device)  # (B,)
-                t = t.view(-1, 1, 1, 1, 1)  # (B, 1, 1, 1, 1)
-                x_t = (1 - t) * x_0 + t * x_1 + torch.randn_like(x_0) * self.sigma
-                u = x_1 - x_0 # (B, C, B, H, W)
+            for index, data in loader:
+                history_mask, history_sequence, target_mask, target_sequence = data
+                history_mask, history_sequence = history_mask.to(self.device), history_sequence.to(self.device)
+                target_mask, target_sequence = target_mask.to(self.device), target_sequence.to(self.device)
+                logger.debug(f"History mask shape: {history_mask.shape}, history sequence shape: {history_sequence.shape}, " +
+                                f"target mask shape: {target_mask.shape}, target sequence shape: {target_sequence.shape}")
+                history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
+                target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
+
+                x_0 = torch.randn_like(target).to(self.device)
+                t = torch.rand(target.shape[0], 1,).to(self.device)  # (B,)
+                t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
+
+                x_t = (1 - t) * x_0 + t * target + torch.randn_like(x_0) * self.sigma
+                true_vel = target - x_0 # (B, C+1, F, W, H)
+                pred_vel = self.model(t=t, x_t=x_t, x_init=history)  # (B, C+1, F, W, H)
+
 
                 self.optimizer.zero_grad()
-                logger.debug(f"Computing training loss for batch {index} with x_t shape: {x_t.shape} and u shape: {u.shape}")
-                loss = self.loss_fn(self.model(t=t, x=x_t), u)
+                logger.debug(f"Computing training loss for batch {index} with x_t shape: {pred_vel.shape} " +
+                             f"and u shape: {true_vel.shape}")
+                loss = self.loss_fn(pred_vel, true_vel)
                 loss.backward()
                 train_losses[index] = loss.item()
                 self.optimizer.step()
@@ -63,17 +71,24 @@ class CFDTrainer():
                     loader = tqdm(enumerate(self.val_dataloader), total=len(self.val_dataloader), leave=False, desc=f"Validation epoch {epoch+1}/{self.epochs}")
                 else:
                     loader = enumerate(self.val_dataloader)
-                for index, batch in loader:
-                    batch = batch.to(self.device)
-                    x_1 = batch  # (batch, C, bundle, H, W)
-                    x_0 = torch.randn_like(x_1).to(self.device)
-                    t = torch.rand(len(x_1), 1).to(self.device)  # (B,)
-                    t = t.view(-1, 1, 1, 1, 1)  # (B, 1, 1, 1, 1)
-                    x_t = (1 - t) * x_0 + t * x_1 + torch.randn_like(x_0) * self.sigma
-                    u = x_1 - x_0  # (B, C, B, H, W)
+                for index, data in loader:
+                    history_mask, history_sequence, target_mask, target_sequence = data
+                    history_mask, history_sequence = history_mask.to(self.device), history_sequence.to(self.device)
+                    target_mask, target_sequence = target_mask.to(self.device), target_sequence.to(self.device)
+                    history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
+                    target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
 
-                    logger.debug(f"Computing validation loss for batch {index} with x_t shape: {x_t.shape} and u shape: {u.shape}")
-                    loss = self.loss_fn(self.model(t=t, x=x_t), u)
+                    x_0 = torch.randn_like(target).to(self.device)
+                    t = torch.rand(target.shape[0], 1, ).to(self.device)  # (B,)
+                    t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
+
+                    x_t = (1 - t) * x_0 + t * target + torch.randn_like(x_0) * self.sigma
+                    true_vel = target - x_0  # (B, C+1, F, W, H)
+                    pred_vel = self.model(t=t, x_t=x_t, x_init=history)  # (B, C+1, F, W, H)
+
+                    logger.debug(f"Computing validation loss for batch {index} with x_t shape: {pred_vel.shape} " +
+                        f"and u shape: {true_vel.shape}")
+                    loss = self.loss_fn(pred_vel, true_vel)
                     val_losses[index] = loss.item()
 
             wandb.log({"train_avg_loss": torch.mean(train_losses),

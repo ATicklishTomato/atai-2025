@@ -42,18 +42,35 @@ def parse_args():
                         type=float,
                         default=1e-4,
                         help='Learning rate for training. Default is 1e-4')
-    parser.add_argument('--bundle_size',
+    parser.add_argument('--predict_frames',
                         type=int,
                         default=20,
-                        help='Number of frames in each training bundle (when using time bundling). Default is 20')
+                        help='Number of frames to predict. Default is 20')
+    parser.add_argument('--history_frames',
+                        type=int,
+                        default=4,
+                        help='Number of history frames to condition on. Default is 4')
     parser.add_argument('--hidden_size',
                         type=int,
                         default=64,
                         help='Base hidden size for the model. Can be multiplied for deeper layers. Default is 64')
+    parser.add_argument('--num_layers',
+                        type=int,
+                        default=3,
+                        help='Number of layers in the model. Default is 3')
+    parser.add_argument('--ch_mults',
+                        type=int,
+                        nargs='+',
+                        default=[1, 2, 2],
+                        help='Channel multipliers for each layer in the model. Default is [1, 2, 2]. Example usage: --ch_mults 1 2 2')
     parser.add_argument('--sigma',
                         type=float,
                         default=0.1,
                         help='Noise level for flow matching model. Default is 0.1')
+    parser.add_argument('--euler_steps',
+                        type=int,
+                        default=20,
+                        help='Number of Euler steps to use during inference. Default is 20')
     parser.add_argument('--device',
                         type=str,
                         default='cuda',
@@ -100,7 +117,7 @@ def parse_args():
 def get_model(args):
     if args.problem == 'cfd':
         from modules.cfd_model import CFDModel
-        model = CFDModel(base_ch=args.hidden_size)
+        model = CFDModel(base_ch=args.hidden_size, ch_mults=args.ch_mults, num_layers=args.num_layers)
     elif args.problem == 'boids':
         from modules.boids_model import BoidsModel
         model = BoidsModel(args)
@@ -111,7 +128,8 @@ def get_model(args):
 def get_dataloaders(args):
     if args.problem == 'cfd':
         from modules.cfd_dataloaders import get_cfd_dataloaders
-        return get_cfd_dataloaders(bundle=args.bundle_size, batch_size=args.batch_size)
+        return get_cfd_dataloaders(predict_frames=args.predict_frames, history_frames=args.history_frames,
+                                   batch_size=args.batch_size)
     elif args.problem == 'boids':
         from modules.boids_dataloaders import get_boids_dataloaders
         return get_boids_dataloaders(args)
@@ -130,11 +148,9 @@ def get_trainer(args, model, train_dataloader, val_dataloader):
 
 def do_test(args, model, val_dataloader):
     if args.problem == 'cfd':
-        from modules.cfd_tester import compute_rollout, animate_rollout
-        device = args.device
-        model = model.to(device)
-        trajectory = compute_rollout(model, num_steps=200, bundle_size=args.bundle_size, device=device)
-        animate_rollout(trajectory, save_path=f"models/output/cfd_rollout.gif", show=args.show, save=(not args.no_save_figures))
+        from modules.cfd_tester import show_prediction
+        show_prediction(model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
+                        show=args.show, save=args.no_save_figures)
     elif args.problem == 'boids':
         raise NotImplementedError("Testing not yet implemented for boids problem")
     else:
@@ -163,25 +179,34 @@ def main():
     wandb_config = {
         "problem": args.problem,
         "epochs": args.epochs,
+        "patience": args.patience,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "predict_frames": args.predict_frames,
+        "history_frames": args.history_frames,
+        "hidden_size": args.hidden_size,
+        "num_layers": args.num_layers,
+        "ch_mults": args.ch_mults,
         "sigma": args.sigma,
-        "bundle_size": args.bundle_size,
-        "use_tqdm": args.use_tqdm,
+        "euler_steps": args.euler_steps,
         "device": args.device,
-        "verbose": args.verbose,
-        "save": args.save,
         "load": args.load,
         "skip_train": args.skip_train,
         "skip_test": args.skip_test,
-        "no_save_figures": args.no_save_figures,
     }
 
-    if args.bundle_size % 4 != 0:
-        logger.error("Bundle size must be divisible by 4 for the CFD model. Exiting.")
-        # This is because the CFD model pools the input 2 times and then upscales again. If the bundle size is not divisible by 4,
-        # the dimensions will not match up for the skip connections because of rounding during pooling.
-        raise ValueError("Bundle size must be divisible by 4 for the CFD model.")
+    if (args.predict_frames + args.history_frames) % 2**(args.num_layers - 1) != 0:
+        # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
+        # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
+        # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
+        # To prevent this, we enforce that the total number of frames is divisible by 2^(num_layers - 1) (since we don't
+        # up-/downsample at the first layer).
+        error_message = (f"The sum of prediction_frames ({args.predict_frames}) and history_frames ({args.history_frames}) " +
+                            f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
+                            "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
+        logger.error(error_message)
+        raise ValueError(error_message)
+
 
     if args.wandb_api_key is not None:
         wandb.login(key=args.wandb_api_key)
