@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --time=7:00:00
-#SBATCH -p gpu_mig
+#SBATCH -p gpu_a100
 #SBATCH -N 1
 #SBATCH --tasks-per-node 1
 #SBATCH --gpus=1
 #SBATCH --output=R-%x.%j.out
-#SBATCH --reservation=terv92681
 
 module purge
 module load 2023
