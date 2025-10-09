@@ -222,14 +222,12 @@ def main():
             'method': 'random',
             'metric': {'name': 'val_avg_loss', 'goal': 'minimize'},
             'parameters': {
-                'lr': {'values': [1e-6, 1e-5, 1e-4]},
-                'sigma': {'min': 0.01, 'max': 0.2},
+                'lr': {'values': [1e-5, 1e-4]},
+                'sigma': {'min': 0.01, 'max': 0.125},
                 'predict_history_frame_combos': {
                     'values': [
-                        (20, 4),
-                        (20, 8),
                         (20, 12),
-                        (10, 2),
+                        (20, 16),
                         (10, 6),
                         (5, 3)
                     ]
@@ -240,7 +238,7 @@ def main():
                         [1, 2, 4]
                     ]
                 },
-                'hidden_size': {'values': [64, 128, 256]}
+                'hidden_size': {'values': [128, 256]}
             }
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)
