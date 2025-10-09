@@ -162,7 +162,8 @@ def sweep_train():
     sweep_args.lr = wandb.config.lr
     sweep_args.sigma = wandb.config.sigma
     sweep_args.predict_frames, sweep_args.history_frames = wandb.config.predict_history_frame_combos
-    sweep_args.hidden_size = wandb.config.layer_size
+    sweep_args.hidden_size = wandb.config.hidden_size
+    sweep_args.ch_mults = wandb.config.ch_mults
     sweep_model = get_model(sweep_args)
     sweep_train_dataloader, sweep_val_dataloader = get_dataloaders(sweep_args)
     trainer = get_trainer(sweep_args, sweep_model, sweep_train_dataloader, sweep_val_dataloader)
@@ -233,7 +234,13 @@ def main():
                         (5, 3)
                     ]
                 },
-                'layer_size': {'values': [64, 128, 256]}
+                'ch_mults': {
+                    'values': [
+                        [1, 2, 2],
+                        [1, 2, 4]
+                    ]
+                },
+                'hidden_size': {'values': [64, 128, 256]}
             }
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)
