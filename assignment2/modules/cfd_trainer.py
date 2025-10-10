@@ -8,7 +8,6 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 class CFDTrainer():
-    # TODO: Implement the trainer class for CFD problem
     def __init__(self, args, model, train_dataloader, val_dataloader):
         self.epochs = args.epochs
         self.device = args.device
@@ -102,7 +101,7 @@ class CFDTrainer():
                     wandb.save(f"./models/cfd_model_epoch{epoch}.pth")
                     logger.info(f"Model checkpoint saved to Weights and Biases for epoch {epoch}")
 
-            logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(val_losses):.6f}, Val Loss: {torch.mean(val_losses):.6f}")
+            logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(train_losses):.6f}, Val Loss: {torch.mean(val_losses):.6f}")
             # Early stopping
             if torch.mean(val_losses) < best_val_loss:
                 best_val_loss = torch.mean(val_losses)

@@ -28,8 +28,8 @@ def parse_args():
                         help='Number of random runs to perform in the hyperparameter sweep. Default is 10')
     parser.add_argument('--epochs',
                         type=int,
-                        default=400,
-                        help='Number of epochs to train for. Default is 400')
+                        default=200,
+                        help='Number of epochs to train for. Default is 200')
     parser.add_argument('--patience',
                         type=int,
                         default=20,
