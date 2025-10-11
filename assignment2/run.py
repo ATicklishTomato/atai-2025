@@ -150,7 +150,7 @@ def do_test(args, model, val_dataloader):
     if args.problem == 'cfd':
         from modules.cfd_tester import show_prediction
         show_prediction(model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
-                        show=args.show, save=args.no_save_figures)
+                        show=args.show, save=args.no_save_figures, sigma=args.sigma)
     elif args.problem == 'boids':
         raise NotImplementedError("Testing not yet implemented for boids problem")
     else:
@@ -196,17 +196,17 @@ def main():
         "skip_test": args.skip_test,
     }
 
-    if (args.predict_frames + args.history_frames) % 2**(args.num_layers - 1) != 0:
-        # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
-        # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
-        # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
-        # To prevent this, we enforce that the total number of frames is divisible by 2^(num_layers - 1) (since we don't
-        # up-/downsample at the first layer).
-        error_message = (f"The sum of prediction_frames ({args.predict_frames}) and history_frames ({args.history_frames}) " +
-                            f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
-                            "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
-        logger.error(error_message)
-        raise ValueError(error_message)
+    # if (args.predict_frames + args.history_frames) % 2**(args.num_layers - 1) != 0:
+    #     # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
+    #     # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
+    #     # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
+    #     # To prevent this, we enforce that the total number of frames is divisible by 2^(num_layers - 1) (since we don't
+    #     # up-/downsample at the first layer).
+    #     error_message = (f"The sum of prediction_frames ({args.predict_frames}) and history_frames ({args.history_frames}) " +
+    #                         f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
+    #                         "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
+    #     logger.error(error_message)
+    #     raise ValueError(error_message)
 
 
     if args.wandb_api_key is not None:
@@ -226,10 +226,9 @@ def main():
                 'sigma': {'min': 0.01, 'max': 0.125},
                 'predict_history_frame_combos': {
                     'values': [
-                        (20, 12),
-                        (20, 16),
-                        (10, 6),
-                        (5, 3)
+                        (20, 20),
+                        (10, 10),
+                        (5, 5)
                     ]
                 },
                 'ch_mults': {
@@ -243,7 +242,9 @@ def main():
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)
         wandb.agent(sweep_id, function=sweep_train, count=args.sweep_runs)
-        return
+        wandb.finish()
+        logger.info("Sweep complete. Logs saved in run.log")
+        exit(0)
 
     wandb.init(project=args.problem, config=wandb_config)
     logger.info("Weights and Biases initialized")
@@ -258,7 +259,7 @@ def main():
             logger.warning(f"No saved model found at models/{args.problem}_model.pth. Starting from scratch.")
     if args.skip_train and not args.load:
         logger.error("Cannot skip training without loading a model. Exiting.")
-        return
+        exit(1)
     if not args.skip_train:
         trainer = get_trainer(args, model, train_dataloader, val_dataloader)
         trainer.train()

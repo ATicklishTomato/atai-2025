@@ -56,7 +56,8 @@ class CFDModel(nn.Module):
     def forward(self, t, x_t, x_init):
         # t: (B, 1, 1, 1, 1), x_t: (B, C, F, W, H), x_init: (B, C, F, W, H)
         logger.debug(f"Forward pass with t shape: {t.shape}, x_t shape: {x_t.shape}, x_init shape: {x_init.shape}")
-        x = torch.cat([x_init, x_t], dim=2)  # (B, C, F, W, H)
+        # x = torch.cat([x_init, x_t], dim=2)  # (B, C, F, W, H)
+        x = x_t
         B, C, F, W, H = x.shape
         t_channel = t.expand(B, 1, F, W, H)  # (B, 1, F, W, H)
         x = torch.cat([x, t_channel], dim=1)  # (B, C+1, F, W, H)
@@ -80,7 +81,7 @@ class CFDModel(nn.Module):
         assert out.shape == (B, C, F, W, H), f"Output shape mismatch: expected {(B, C, F, W, H)}, got {out.shape}"
 
         # Remove the init frames from the output
-        out = out[:, :, x_init.shape[2]:, :, :]  # (B, C, F_out, W, H)
+        # out = out[:, :, x_init.shape[2]:, :, :]  # (B, C, F_out, W, H)
 
         logger.debug(f"Forward pass with out shape: {out.shape}")
         return out

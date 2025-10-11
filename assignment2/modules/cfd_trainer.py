@@ -45,7 +45,12 @@ class CFDTrainer():
                 history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
                 target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
 
-                x_0 = torch.randn_like(target).to(self.device)
+                # mu_hist = history.mean(dim=2)
+                # sigma_hist = self.sigma
+                # x_0 = mu_hist + sigma_hist * torch.randn_like(mu_hist)
+                # x_0 = x_0.unsqueeze(2).repeat(1, 1, target.shape[2], 1, 1)  # (B, C+1, F, W, H)
+                x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
+                # x_0 = torch.randn_like(target).to(self.device)
                 t = torch.rand(target.shape[0], 1,).to(self.device)  # (B,)
                 t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
 
@@ -77,7 +82,12 @@ class CFDTrainer():
                     history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
                     target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
 
-                    x_0 = torch.randn_like(target).to(self.device)
+                    # mu_hist = history.mean(dim=2)
+                    # sigma_hist = self.sigma
+                    # x_0 = mu_hist + sigma_hist * torch.randn_like(mu_hist)
+                    # x_0 = x_0.unsqueeze(2).repeat(1, 1, target.shape[2], 1, 1)  # (B, C+1, F, W, H)
+                    x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
+                    # x_0 = torch.randn_like(target).to(self.device)
                     t = torch.rand(target.shape[0], 1, ).to(self.device)  # (B,)
                     t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
 
