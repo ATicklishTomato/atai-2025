@@ -6,10 +6,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class HistoryEncoder(nn.Module):
-    def __init__(self, in_channels, hidden_channels=32, dropout=0.1):
+class AdaptiveHistoryEncoder(nn.Module):
+    def __init__(self, in_channels, out_channels, hidden_channels=32, dropout=0.1):
+        """
+        A small 3D conv encoder that compresses the history tensor and adapts it
+        to a target UNet feature map resolution.
+        """
         super().__init__()
-        self.net = nn.Sequential(
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
+        self.encoder = nn.Sequential(
             nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1),
             nn.BatchNorm3d(hidden_channels),
             nn.GELU(),
@@ -17,17 +24,26 @@ class HistoryEncoder(nn.Module):
             nn.BatchNorm3d(hidden_channels),
             nn.GELU(),
             nn.Dropout3d(dropout),
-            nn.Conv3d(hidden_channels, 1, kernel_size=1)  # compress to single channel
+            nn.Conv3d(hidden_channels, out_channels, kernel_size=1)
         )
 
-    def forward(self, history):
+    def forward(self, history, target_shape):
         """
         Args:
-            history: (B, C, F, W, H)
+            history: (B, C_in, F_in, H_in, W_in)
+            target_shape: tuple of (B, C_target, F_target, H_target, W_target)
+                — used to resize the output to match UNet feature map dimensions
         Returns:
-            encoded_history: (B, 1, F, W, H)
+            encoded: (B, out_channels, F_target, H_target, W_target)
         """
-        return self.net(history)
+        B, _, F_t, H_t, W_t = target_shape
+        encoded = self.encoder(history)  # (B, out_channels, F_in, H_in, W_in)
+        logger.debug(f"History encoded shape before resize: {encoded.shape}")
+
+        # Resize spatial/temporal dims to match target UNet feature size
+        encoded = F.interpolate(encoded, size=(F_t, H_t, W_t), mode='trilinear', align_corners=False)
+        logger.debug(f"encoded shape: {encoded.shape}")
+        return encoded
 
 class ResBlock(nn.Module):
     def __init__(self, in_ch, out_ch, dropout=0.1, do_dropout=False):
@@ -59,15 +75,17 @@ class ResBlock(nn.Module):
 # UNet-like architecture (with t as extra channel)
 # -------------------------
 class CFDModel(nn.Module):
-    def __init__(self, in_ch=4, base_ch=64, ch_mults=[1, 2, 2], num_layers=3, dropout=0.1):
+    def __init__(self, in_ch=4, base_ch=64, ch_mults=[1, 2, 2], num_layers=3, dropout=0.1, condition_on_history=True):
         # in_ch=4 for CFD (mask+vx+vy+p) + 1 for FM time
         super().__init__()
 
         assert num_layers == len(ch_mults), "num_layers must match length of ch_mults"
 
-        self.history_encoder = HistoryEncoder(in_channels=in_ch, hidden_channels=base_ch, dropout=0.1)
+        self.condition_on_history = condition_on_history
+        if self.condition_on_history:
+            self.history_encoder = AdaptiveHistoryEncoder(in_ch + 1, base_ch * ch_mults[0], base_ch * ch_mults[1], dropout)
 
-        self.enc1 = ResBlock(in_ch + 1, base_ch, dropout=dropout, do_dropout=True)  # +1 for time channel
+        self.enc1 = ResBlock(in_ch + 1, base_ch * ch_mults[0], dropout=dropout, do_dropout=True)  # +1 for time channel
         self.next_encoders = nn.ModuleList(
             [ResBlock(base_ch * ch_mults[i], base_ch * ch_mults[i + 1], dropout=dropout, do_dropout=True) for i in range(len(ch_mults) - 1)]
         )
@@ -85,14 +103,21 @@ class CFDModel(nn.Module):
     def forward(self, t, x_t, x_init):
         # t: (B, 1, 1, 1, 1), x_t: (B, C, F, W, H), x_init: (B, C, F, W, H)
         logger.debug(f"Forward pass with t shape: {t.shape}, x_t shape: {x_t.shape}, x_init shape: {x_init.shape}")
-        # x = torch.cat([x_init, x_t], dim=2)  # (B, C, F, W, H)
-        x = x_t
-        B, C, F, W, H = x.shape
+        B, C, F, W, H = x_t.shape
         t_channel = t.expand(B, 1, F, W, H)  # (B, 1, F, W, H)
-        x = torch.cat([x, t_channel], dim=1)  # (B, C+1, F, W, H)
+        x = torch.cat([x_t, t_channel], dim=1)  # (B, C+2, F, W, H)
         logger.debug(f"Forward pass with shape {x.shape}")
         h = self.enc1(x)  # (B, base_ch, F, W, H)
         logger.debug(f"After initial encoder: {h.shape}")
+
+        if self.condition_on_history:
+            B_init, C_init, F_init, W_init, H_init = x_init.shape
+            t_init = t.expand(B_init, 1, F_init, W_init, H_init)  # (B, 1, F_init, W_init, H_init)
+            x_init = torch.cat([x_init, t_init], dim=1)
+            x_init_emb = self.history_encoder(x_init, target_shape=h.shape)
+            h = h + x_init_emb  # Add encoded history
+            logger.debug(f"After adding history encoding: {h.shape}")
+
         enc_features = [h]
         for enc in self.next_encoders:
             h = self.avg_pool(h)  # Downsample
@@ -108,9 +133,6 @@ class CFDModel(nn.Module):
         logger.debug(f"After decoder layer: {out.shape}")
 
         assert out.shape == (B, C, F, W, H), f"Output shape mismatch: expected {(B, C, F, W, H)}, got {out.shape}"
-
-        # Remove the init frames from the output
-        # out = out[:, :, x_init.shape[2]:, :, :]  # (B, C, F_out, W, H)
 
         logger.debug(f"Forward pass with out shape: {out.shape}")
         return out

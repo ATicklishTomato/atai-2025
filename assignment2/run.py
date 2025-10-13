@@ -26,6 +26,11 @@ def parse_args():
                         type=int,
                         default=10,
                         help='Number of random runs to perform in the hyperparameter sweep. Default is 10')
+    parser.add_argument('--run_tags',
+                        type=str,
+                        nargs='+',
+                        default=[],
+                        help='Tags to add to the Weights and Biases run. Default is empty list. Example usage: --run_tags tag1 tag2')
     parser.add_argument('--epochs',
                         type=int,
                         default=200,
@@ -50,6 +55,11 @@ def parse_args():
                         type=int,
                         default=4,
                         help='Number of history frames to condition on. Default is 4')
+    parser.add_argument('--condition_on',
+                        type=str,
+                        default="prior",
+                        choices=["prior", "vector_field", "both"],
+                        help='CFD ONLY - Type of conditioning to apply using history frames. Default is "prior"')
     parser.add_argument('--hidden_size',
                         type=int,
                         default=64,
@@ -65,8 +75,8 @@ def parse_args():
                         help='Channel multipliers for each layer in the model. Default is [1, 2, 2]. Example usage: --ch_mults 1 2 2')
     parser.add_argument('--sigma',
                         type=float,
-                        default=0.1,
-                        help='Noise level for flow matching model. Default is 0.1')
+                        default=0.015,
+                        help='Noise level for flow matching model and variance on conditioned prior. Default is 0.015')
     parser.add_argument('--euler_steps',
                         type=int,
                         default=20,
@@ -78,9 +88,6 @@ def parse_args():
     parser.add_argument('--use_tqdm',
                         action='store_true',
                         help='Use tqdm progress bars during training. Default is False')
-    parser.add_argument('--show',
-                        action='store_true',
-                        help='Show any animations or graphs that are generated. Default is False')
     parser.add_argument('--verbose',
                         type=int,
                         default=logging.INFO,
@@ -117,7 +124,8 @@ def parse_args():
 def get_model(args):
     if args.problem == 'cfd':
         from modules.cfd_model import CFDModel
-        model = CFDModel(base_ch=args.hidden_size, ch_mults=args.ch_mults, num_layers=args.num_layers)
+        model = CFDModel(base_ch=args.hidden_size, ch_mults=args.ch_mults, num_layers=args.num_layers,
+                         condition_on_history=args.vector_field_conditioning)
     elif args.problem == 'boids':
         from modules.boids_model import BoidsModel
         model = BoidsModel(args)
@@ -148,20 +156,22 @@ def get_trainer(args, model, train_dataloader, val_dataloader):
 
 def do_test(args, model, val_dataloader):
     if args.problem == 'cfd':
-        from modules.cfd_tester import show_prediction
-        show_prediction(model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
-                        show=args.show, save=args.no_save_figures, sigma=args.sigma)
+        from modules.cfd_tester import generate_single_prediction
+        generate_single_prediction(model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
+                                   save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning)
     elif args.problem == 'boids':
         raise NotImplementedError("Testing not yet implemented for boids problem")
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
 def sweep_train():
-    wandb.init(config=wandb.config)
     sweep_args = parse_args()
+    wandb.init(config=wandb.config, tags=sweep_args.run_tags)
     sweep_args.lr = wandb.config.lr
     sweep_args.sigma = wandb.config.sigma
     sweep_args.predict_frames, sweep_args.history_frames = wandb.config.predict_history_frame_combos
+    sweep_args.prior_conditioning = wandb.config.prior_conditioning
+    sweep_args.vector_field_conditioning = wandb.config.vector_field_conditioning
     sweep_args.hidden_size = wandb.config.hidden_size
     sweep_args.ch_mults = wandb.config.ch_mults
     sweep_model = get_model(sweep_args)
@@ -171,6 +181,8 @@ def sweep_train():
 
 def main():
     args = parse_args()
+    args.prior_conditioning = args.condition_on in ["prior", "both"]
+    args.vector_field_conditioning = args.condition_on in ["vector_field", "both"]
     logging.basicConfig(
         filename=f'run-{args.problem}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.log',
         level=args.verbose,
@@ -196,17 +208,17 @@ def main():
         "skip_test": args.skip_test,
     }
 
-    # if (args.predict_frames + args.history_frames) % 2**(args.num_layers - 1) != 0:
-    #     # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
-    #     # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
-    #     # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
-    #     # To prevent this, we enforce that the total number of frames is divisible by 2^(num_layers - 1) (since we don't
-    #     # up-/downsample at the first layer).
-    #     error_message = (f"The sum of prediction_frames ({args.predict_frames}) and history_frames ({args.history_frames}) " +
-    #                         f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
-    #                         "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
-    #     logger.error(error_message)
-    #     raise ValueError(error_message)
+    if args.predict_frames % 2**(args.num_layers - 1) != 0:
+        # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
+        # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
+        # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
+        # To prevent this, we enforce that the number of frames the model gets is divisible by 2^(num_layers - 1) (since we don't
+        # up-/downsample at the first layer).
+        error_message = (f"The number of prediction_frames ({args.predict_frames}) " +
+                            f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
+                            "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
+        logger.error(error_message)
+        raise ValueError(error_message)
 
 
     if args.wandb_api_key is not None:
@@ -224,13 +236,18 @@ def main():
             'parameters': {
                 'lr': {'values': [1e-5, 1e-4]},
                 'sigma': {'min': 0.01, 'max': 0.125},
-                'predict_history_frame_combos': {
+                'predict_history_frame_combos': { # We combine them to ensure valid combos
                     'values': [
                         (20, 20),
-                        (10, 10),
-                        (5, 5)
+                        (20, 16),
+                        (20, 8),
+                        (12, 12),
+                        (12, 8),
+                        (12, 4)
                     ]
                 },
+                'prior_conditioning': {'values': [True, False]},
+                'vector_field_conditioning': {'values': [True, False]},
                 'ch_mults': {
                     'values': [
                         [1, 2, 2],
@@ -246,7 +263,7 @@ def main():
         logger.info("Sweep complete. Logs saved in run.log")
         exit(0)
 
-    wandb.init(project=args.problem, config=wandb_config)
+    wandb.init(project=args.problem, config=wandb_config, tags=args.run_tags)
     logger.info("Weights and Biases initialized")
     model = get_model(args)
     train_dataloader, val_dataloader = get_dataloaders(args)

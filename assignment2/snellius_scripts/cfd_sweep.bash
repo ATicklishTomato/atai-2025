@@ -16,4 +16,4 @@ source .venv/bin/activate # Activate virtual environment
 pip install -r requirements.txt # Install leftover dependencies
 
 #echo 'Starting new experiment';
-python run.py --sweep --sweep_runs 15
+python run.py --sweep --sweep_runs 25

@@ -20,6 +20,7 @@ class CFDTrainer():
         self.use_tqdm = args.use_tqdm
         self.save = args.save
         self.patience = args.patience
+        self.condition_on_history = args.prior_conditioning
 
 
     def train(self):
@@ -45,16 +46,25 @@ class CFDTrainer():
                 history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
                 target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
 
-                # mu_hist = history.mean(dim=2)
-                # sigma_hist = self.sigma
-                # x_0 = mu_hist + sigma_hist * torch.randn_like(mu_hist)
-                # x_0 = x_0.unsqueeze(2).repeat(1, 1, target.shape[2], 1, 1)  # (B, C+1, F, W, H)
-                x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
-                # x_0 = torch.randn_like(target).to(self.device)
+                if self.condition_on_history:
+                    x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
+                    logger.debug(f"x_0 shape before conditioning: {x_0.shape}")
+                    noise_padding = torch.randn_like(target).to(self.device)
+                    padding_needed = noise_padding.shape[2] - x_0.shape[2]
+                    logger.debug(f"padding needed: {padding_needed}")
+                    if padding_needed > 0:
+                        # Prepend random noise to x_0 to match target's frame dimension
+                        x_0 = torch.cat([noise_padding[:, :, :padding_needed], x_0], dim=2)
+                    elif padding_needed < 0:
+                        x_0 = x_0[:, :, -padding_needed:]  # Trim x_0 to match target's frame dimension
+                    logger.debug(f"x_0 shape after conditioning: {x_0.shape}")
+                else:
+                    x_0 = torch.randn_like(target).to(self.device)
                 t = torch.rand(target.shape[0], 1,).to(self.device)  # (B,)
                 t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
-
                 x_t = (1 - t) * x_0 + t * target + torch.randn_like(x_0) * self.sigma
+
+
                 true_vel = target - x_0 # (B, C+1, F, W, H)
                 pred_vel = self.model(t=t, x_t=x_t, x_init=history)  # (B, C+1, F, W, H)
 
@@ -82,12 +92,20 @@ class CFDTrainer():
                     history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
                     target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
 
-                    # mu_hist = history.mean(dim=2)
-                    # sigma_hist = self.sigma
-                    # x_0 = mu_hist + sigma_hist * torch.randn_like(mu_hist)
-                    # x_0 = x_0.unsqueeze(2).repeat(1, 1, target.shape[2], 1, 1)  # (B, C+1, F, W, H)
-                    x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
-                    # x_0 = torch.randn_like(target).to(self.device)
+                    if self.condition_on_history:
+                        x_0 = history + self.sigma * torch.randn_like(history).to(self.device)
+                        logger.debug(f"x_0 shape before conditioning: {x_0.shape}")
+                        noise_padding = torch.randn_like(target).to(self.device)
+                        padding_needed = noise_padding.shape[2] - x_0.shape[2]
+                        logger.debug(f"padding needed: {padding_needed}")
+                        if padding_needed > 0:
+                            # Prepend random noise to x_0 to match target's frame dimension
+                            x_0 = torch.cat([noise_padding[:, :, :padding_needed], x_0], dim=2)
+                        elif padding_needed < 0:
+                            x_0 = x_0[:, :, -padding_needed:]  # Trim x_0 to match target's frame dimension
+                        logger.debug(f"x_0 shape after conditioning: {x_0.shape}")
+                    else:
+                        x_0 = torch.randn_like(target).to(self.device)
                     t = torch.rand(target.shape[0], 1, ).to(self.device)  # (B,)
                     t = t.view(-1, 1, 1, 1, 1)  # (B,1,1,1,1)
 
@@ -118,6 +136,7 @@ class CFDTrainer():
                 patience = self.patience
             else:
                 patience -= 1
+                logger.info(f"No improvement in validation loss. Patience left: {patience}")
                 if patience <= 0:
                     logger.info("Early stopping triggered.")
                     break

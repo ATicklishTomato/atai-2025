@@ -10,8 +10,9 @@ def magnitude(tensor):
     return torch.sqrt(tensor[0,:,:]**2 + tensor[1,:,:]**2)
 
 @torch.no_grad()
-def show_prediction(model, val_dataloader, euler_steps=20, device="cuda", show=True,
-                    save_path="./models/output/prediction.gif", save=False, sigma=0.025):
+def generate_single_prediction(model, val_dataloader, euler_steps=20, device="cuda",
+                               save_path="./models/output/prediction.gif", save=False, sigma=0.025,
+                               condition_on_history=True):
     logger.info(f"Showing prediction for {euler_steps} euler steps")
     model.to(device)
     model.eval()
@@ -22,15 +23,20 @@ def show_prediction(model, val_dataloader, euler_steps=20, device="cuda", show=T
     target_mask, target_sequence = target_mask.to(device), target_sequence.to(device)
     history = torch.cat([history_mask, history_sequence], dim=1)  # [B, C+1, F, W, H]
     target = torch.cat([target_mask, target_sequence], dim=1)  # [B, C+1, F, W, H]
-    # noise = torch.randn_like(target).to(device)
 
-    # mu_hist = history.mean(dim=2)
-    # sigma_hist = 0.025
-    # x_0 = mu_hist + sigma_hist * torch.randn_like(mu_hist)
-    # noise = x_0.unsqueeze(2).repeat(1, 1, target.shape[2], 1, 1).to(device)  # (B, C+1, F, W, H)
-    history = history + sigma * torch.randn_like(history).to(device)
+    if condition_on_history:
+        x = history + sigma * torch.randn_like(history).to(device)
+        noise_padding = torch.randn_like(target).to(device)
+        padding_needed = noise_padding.shape[2] - x.shape[2]
+        if padding_needed > 0:
+            # Prepend random noise to x_0 to match target's frame dimension
+            x = torch.cat([noise_padding[:, :, :padding_needed], x], dim=2)
+        elif padding_needed < 0:
+            x = x[:, :, -padding_needed:]  # Trim x_0 to match target's frame dimension
+    else:
+        x = torch.randn_like(target).to(device)
 
-    output = model.generation(history, history, euler_steps)  # [B, C+1, F, W, H]
+    output = model.generation(x, history, euler_steps)  # [B, C+1, F, W, H]
     output = output.cpu().numpy()
     target = target.cpu().numpy()
 
@@ -77,8 +83,6 @@ def show_prediction(model, val_dataloader, euler_steps=20, device="cuda", show=T
         return [im_target_vel, im_output_vel, im_target_press, im_output_press]
 
     ani = FuncAnimation(fig, update, frames=F, init_func=init, blit=False, interval=200)
-    if show:
-        plt.show()
     if save:
         ani.save(save_path, writer='ffmpeg')
         logger.info(f"Saved prediction animation to {save_path}")
