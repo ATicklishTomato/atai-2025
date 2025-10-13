@@ -45,10 +45,17 @@ def show_prediction(model, val_dataloader, euler_steps=20, device="cuda", show=T
     # Initialize one imshow per subplot (first frame)
     mag_target = magnitude(torch.tensor(target[0, 1:3, 0])).numpy()
     mag_output = magnitude(torch.tensor(output[0, 1:3, 0])).numpy()
-    im_target_vel = axes[0, 0].imshow(mag_target, cmap='viridis', animated=True)
-    im_output_vel = axes[1, 0].imshow(mag_output, cmap='viridis', animated=True)
-    im_target_press = axes[0, 1].imshow(target[0, 3, 0], cmap='viridis', animated=True)
-    im_output_press = axes[1, 1].imshow(output[0, 3, 0], cmap='viridis', animated=True)
+    # Compute the vmin and vmax of the whole sequence for consistent color scaling
+    whole_mag_target = magnitude(torch.tensor(target[0, 1:3, :])).numpy()
+    whole_mag_output = magnitude(torch.tensor(output[0, 1:3, :])).numpy()
+    vmin_vel = min(whole_mag_target.min(), whole_mag_output.min())
+    vmax_vel = max(whole_mag_target.max(), whole_mag_output.max())
+    vmin_press = min(target[0, 3, :].min(), output[0, 3, :].min())
+    vmax_press = max(target[0, 3, :].max(), output[0, 3, :].max())
+    im_target_vel = axes[0, 0].imshow(mag_target, cmap='viridis', animated=True, vmin=vmin_vel, vmax=vmax_vel)
+    im_output_vel = axes[1, 0].imshow(mag_output, cmap='viridis', animated=True, vmin=vmin_vel, vmax=vmax_vel)
+    im_target_press = axes[0, 1].imshow(target[0, 3, 0], cmap='viridis', animated=True, vmin=vmin_press, vmax=vmax_press)
+    im_output_press = axes[1, 1].imshow(output[0, 3, 0], cmap='viridis', animated=True, vmin=vmin_press, vmax=vmax_press)
 
     for i, name in enumerate(names):
         axes[0, i].set_title(f"Target {name}")
