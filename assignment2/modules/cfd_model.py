@@ -71,9 +71,7 @@ class ResBlock(nn.Module):
         return out
 
 
-# -------------------------
-# UNet-like architecture (with t as extra channel)
-# -------------------------
+
 class CFDModel(nn.Module):
     def __init__(self, in_ch=4, base_ch=64, ch_mults=[1, 2, 2], num_layers=3, dropout=0.1, condition_on_history=True):
         # in_ch=4 for CFD (mask+vx+vy+p) + 1 for FM time
@@ -100,22 +98,22 @@ class CFDModel(nn.Module):
         self.out_dec = ResBlock(base_ch * ch_mults[0], in_ch, do_dropout=False) # No dropout at end like CFD practical
 
 
-    def forward(self, t, x_t, x_init):
-        # t: (B, 1, 1, 1, 1), x_t: (B, C, F, W, H), x_init: (B, C, F, W, H)
-        logger.debug(f"Forward pass with t shape: {t.shape}, x_t shape: {x_t.shape}, x_init shape: {x_init.shape}")
+    def forward(self, t, x_t, x_hist):
+        # t: (B, 1, 1, 1, 1), x_t: (B, C, F_target, W, H), x_init: (B, C, F_hist, W, H)
+        logger.debug(f"Forward pass with t shape: {t.shape}, x_t shape: {x_t.shape}, x_init shape: {x_hist.shape}")
         B, C, F, W, H = x_t.shape
-        t_channel = t.expand(B, 1, F, W, H)  # (B, 1, F, W, H)
-        x = torch.cat([x_t, t_channel], dim=1)  # (B, C+2, F, W, H)
+        t_channel = t.expand(B, 1, F, W, H)  # (B, 1, F_target, W, H)
+        x = torch.cat([x_t, t_channel], dim=1)  # (B, C+1, F_target, W, H)
         logger.debug(f"Forward pass with shape {x.shape}")
         h = self.enc1(x)  # (B, base_ch, F, W, H)
         logger.debug(f"After initial encoder: {h.shape}")
 
         if self.condition_on_history:
-            B_init, C_init, F_init, W_init, H_init = x_init.shape
-            t_init = t.expand(B_init, 1, F_init, W_init, H_init)  # (B, 1, F_init, W_init, H_init)
-            x_init = torch.cat([x_init, t_init], dim=1)
-            x_init_emb = self.history_encoder(x_init, target_shape=h.shape)
-            h = h + x_init_emb  # Add encoded history
+            B_hist, C_hist, F_hist, W_hist, H_hist = x_hist.shape
+            t_hist = t.expand(B_hist, 1, F_hist, W_hist, H_hist)  # (B, 1, F_hist, W_hist, H_hist)
+            x_hist = torch.cat([x_hist, t_hist], dim=1)
+            x_hist_emb = self.history_encoder(x_hist, target_shape=h.shape)
+            h = h + x_hist_emb  # Add encoded history
             logger.debug(f"After adding history encoding: {h.shape}")
 
         enc_features = [h]
@@ -137,12 +135,12 @@ class CFDModel(nn.Module):
         logger.debug(f"Forward pass with out shape: {out.shape}")
         return out
 
-    def generation(self, x, x_init, n_euler_steps, t_start=0.0, t_end=1.0):
+    def generation(self, x, x_hist, n_euler_steps, t_start=0.0, t_end=1.0):
         logger.debug(f"Generation with x shape: {x.shape}, n_euler_steps: {n_euler_steps}, t_start: {t_start}, t_end: {t_end}")
         time_steps = torch.linspace(t_start, t_end, n_euler_steps + 1).view(-1, 1, 1, 1, 1).to(x.device)
 
         for i in range(n_euler_steps):
-            x = x + (time_steps[i + 1] - time_steps[i]) * self(t=time_steps[i], x_t=x, x_init=x_init)
+            x = x + (time_steps[i + 1] - time_steps[i]) * self(t=time_steps[i], x_t=x, x_hist=x_hist)
 
         logger.debug(f"Generation with x shape: {x.shape}")
         return x

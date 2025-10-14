@@ -24,7 +24,6 @@ class CFDTrainer():
 
 
     def train(self):
-        # Implement the training loop
         wandb.watch(self.model, log='all')
         logger.info("Model watched by Weights and Biases")
         best_val_loss = float('inf')
@@ -66,7 +65,7 @@ class CFDTrainer():
 
 
                 true_vel = target - x_0 # (B, C+1, F, W, H)
-                pred_vel = self.model(t=t, x_t=x_t, x_init=history)  # (B, C+1, F, W, H)
+                pred_vel = self.model(t=t, x_t=x_t, x_hist=history)  # (B, C+1, F, W, H)
 
 
                 self.optimizer.zero_grad()
@@ -111,7 +110,7 @@ class CFDTrainer():
 
                     x_t = (1 - t) * x_0 + t * target + torch.randn_like(x_0) * self.sigma
                     true_vel = target - x_0  # (B, C+1, F, W, H)
-                    pred_vel = self.model(t=t, x_t=x_t, x_init=history)  # (B, C+1, F, W, H)
+                    pred_vel = self.model(t=t, x_t=x_t, x_hist=history)  # (B, C+1, F, W, H)
 
                     logger.debug(f"Computing validation loss for batch {index} with x_t shape: {pred_vel.shape} " +
                         f"and u shape: {true_vel.shape}")
