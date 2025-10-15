@@ -22,6 +22,18 @@ class CFDTrainer():
         self.patience = args.patience
         self.condition_on_history = args.prior_conditioning
 
+        if self.condition_on_history and self.model.condition_on_history:
+            type_prefix = "both_"
+        elif self.condition_on_history and not self.model.condition_on_history:
+            type_prefix = "prior_"
+        elif not self.condition_on_history and self.model.condition_on_history:
+            type_prefix = "vf_"
+        else:
+            type_prefix = "uncond_"
+
+        self.model_name = f"{type_prefix}cfd_model"
+
+
 
     def train(self):
         wandb.watch(self.model, log='all')
@@ -123,9 +135,9 @@ class CFDTrainer():
 
             if epoch % (self.epochs // 10) == 0 and epoch > 0:
                 if self.save:
-                    torch.save(self.model.state_dict(), f"./models/cfd_model_epoch{epoch}.pth")
-                    logger.info(f"Model checkpoint saved to ./models/cfd_model_epoch{epoch}.pth")
-                    wandb.save(f"./models/cfd_model_epoch{epoch}.pth")
+                    torch.save(self.model.state_dict(), f"./models/{self.model_name}_epoch{epoch}.pth")
+                    logger.info(f"Model checkpoint saved to ./models/{self.model_name}_epoch{epoch}.pth")
+                    wandb.save(f"./models/{self.model_name}_epoch{epoch}.pth")
                     logger.info(f"Model checkpoint saved to Weights and Biases for epoch {epoch}")
 
             logger.info(f"Epoch {epoch+1}/{self.epochs} completed. Train Loss: {torch.mean(train_losses):.6f}, Val Loss: {torch.mean(val_losses):.6f}")
@@ -142,7 +154,7 @@ class CFDTrainer():
 
         logger.info("Training completed.")
         if self.save:
-            torch.save(self.model.state_dict(), "./models/cfd_model.pth")
-            logger.info("Model saved to ./models/cfd_model.pth")
-            wandb.save("./models/cfd_model.pth")
+            torch.save(self.model.state_dict(), f"./models/{self.model_name}.pth")
+            logger.info(f"Model saved to ./models/{self.model_name}.pth")
+            wandb.save(f"./models/{self.model_name}.pth")
             logger.info("Model checkpoint saved to Weights and Biases")

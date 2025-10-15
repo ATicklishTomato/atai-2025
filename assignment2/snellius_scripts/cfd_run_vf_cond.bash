@@ -16,4 +16,4 @@ source .venv/bin/activate # Activate virtual environment
 pip install -r requirements.txt # Install leftover dependencies
 
 #echo 'Starting new experiment';
-python 	run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 16 --sigma 0.04 --save --skip_test --condition_on "both" --run_tags "cfd_eval"
+python 	run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 16 --sigma 0.04 --save --skip_test --condition_on "vector_field" --run_tags "cfd_eval"
