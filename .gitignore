@@ -1,8 +1,11 @@
 data/CFD/grid/concat/*
 .venv
 .idea
-data/boids/processed/*
+**/processed/*
 data/boids_sensitivity/processed/*
 **/.ipynb_checkpoints/*
 **/output/*
 **/wandb.login
+**/__pycache__/*
+*.log
+**/wandb/*

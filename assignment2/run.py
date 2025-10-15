@@ -1,7 +1,12 @@
 import os
 from argparse import ArgumentParser
 import logging
+from datetime import datetime
+import torch
 import wandb
+
+# Change wandb logging directory so IDEs don't confuse log directory for importable package
+os.environ['WANDB_DIR'] = './wandb_logs'
 
 logger = logging.getLogger(__name__)
 
@@ -19,24 +24,70 @@ def parse_args():
                         'any arguments passed related to sweep parameters')
     parser.add_argument('--sweep_runs',
                         type=int,
-                        default=25,
-                        help='Number of random runs to perform in the hyperparameter sweep. Default is 25')
+                        default=10,
+                        help='Number of random runs to perform in the hyperparameter sweep. Default is 10')
+    parser.add_argument('--run_tags',
+                        type=str,
+                        nargs='+',
+                        default=[],
+                        help='Tags to add to the Weights and Biases run. Default is empty list. Example usage: --run_tags tag1 tag2')
     parser.add_argument('--epochs',
                         type=int,
-                        default=1001,
-                        help='Number of epochs to train for. Default is 1001')
+                        default=200,
+                        help='Number of epochs to train for. Default is 200')
+    parser.add_argument('--patience',
+                        type=int,
+                        default=20,
+                        help='Number of epochs with no improvement on validation loss before stopping training early. Default is 20')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=1,
-                        help='Batch size for training. Default is 1')
+                        default=4,
+                        help='Batch size for training. Default is 4')
     parser.add_argument('--lr',
                         type=float,
-                        default=1e-3,
-                        help='Learning rate for training. Default is 1e-3')
+                        default=1e-4,
+                        help='Learning rate for training. Default is 1e-4')
+    parser.add_argument('--predict_frames',
+                        type=int,
+                        default=20,
+                        help='Number of frames to predict. Default is 20')
+    parser.add_argument('--history_frames',
+                        type=int,
+                        default=4,
+                        help='Number of history frames to condition on. Default is 4')
+    parser.add_argument('--condition_on',
+                        type=str,
+                        default="prior",
+                        choices=["prior", "vector_field", "both"],
+                        help='CFD ONLY - Type of conditioning to apply using history frames. Default is "prior"')
+    parser.add_argument('--hidden_size',
+                        type=int,
+                        default=64,
+                        help='Base hidden size for the model. Can be multiplied for deeper layers. Default is 64')
+    parser.add_argument('--num_layers',
+                        type=int,
+                        default=3,
+                        help='Number of layers in the model. Default is 3')
+    parser.add_argument('--ch_mults',
+                        type=int,
+                        nargs='+',
+                        default=[1, 2, 2],
+                        help='Channel multipliers for each layer in the model. Default is [1, 2, 2]. Example usage: --ch_mults 1 2 2')
+    parser.add_argument('--sigma',
+                        type=float,
+                        default=0.015,
+                        help='Noise level for flow matching model and variance on conditioned prior. Default is 0.015')
+    parser.add_argument('--euler_steps',
+                        type=int,
+                        default=20,
+                        help='Number of Euler steps to use during inference. Default is 20')
     parser.add_argument('--device',
                         type=str,
                         default='cuda',
                         help='PyTorch device to train on. Default is cuda')
+    parser.add_argument('--use_tqdm',
+                        action='store_true',
+                        help='Use tqdm progress bars during training. Default is False')
     parser.add_argument('--verbose',
                         type=int,
                         default=logging.INFO,
@@ -57,6 +108,9 @@ def parse_args():
     parser.add_argument('--skip_test',
                         action='store_true',
                         help='Skip testing and only train the model. Default is False')
+    parser.add_argument('--no_save_figures',
+                        action='store_false',
+                        help='Save any figures that are generated during testing. Default is True')
     parser.add_argument('--wandb_api_key',
                         type=str,
                         default=None,
@@ -69,10 +123,11 @@ def parse_args():
 
 def get_model(args):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_model import CFDModel
-        model = CFDModel(args)
+        from modules.cfd_model import CFDModel
+        model = CFDModel(base_ch=args.hidden_size, ch_mults=args.ch_mults, num_layers=args.num_layers,
+                         condition_on_history=args.vector_field_conditioning)
     elif args.problem == 'boids':
-        from assignment2.modules.boids_model import BoidsModel
+        from modules.boids_model import BoidsModel
         model = BoidsModel(args)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
@@ -80,28 +135,82 @@ def get_model(args):
 
 def get_dataloaders(args):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_dataloaders import get_cfd_dataloaders
-        return get_cfd_dataloaders(args)
+        from modules.cfd_dataloaders import get_cfd_dataloaders
+        return get_cfd_dataloaders(predict_frames=args.predict_frames, history_frames=args.history_frames,
+                                   batch_size=args.batch_size)
     elif args.problem == 'boids':
-        from assignment2.modules.boids_dataloaders import get_boids_dataloaders
+        from modules.boids_dataloaders import get_boids_dataloaders
         return get_boids_dataloaders(args)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
 def get_trainer(args, model, train_dataloader, val_dataloader):
     if args.problem == 'cfd':
-        from assignment2.modules.cfd_trainer import CFDTrainer
+        from modules.cfd_trainer import CFDTrainer
         return CFDTrainer(args, model, train_dataloader, val_dataloader)
     elif args.problem == 'boids':
-        from assignment2.modules.boids_trainer import BoidsTrainer
+        from modules.boids_trainer import BoidsTrainer
         return BoidsTrainer(args, model, train_dataloader, val_dataloader)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
+def do_test(args, model, train_dataloader, val_dataloader):
+    from modules.evaluation import Evaluator
+
+    if args.problem == 'cfd':
+        from modules.cfd_tester import generate_single_prediction
+        generate_single_prediction(
+            model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
+            save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning
+        )
+        evaluator = Evaluator(
+            model, 
+            train_dataloader, 
+            val_dataloader, 
+            problem_type='cfd', 
+            wandb_api_key=args.wandb_api_key,
+            prior_conditioning=args.prior_conditioning
+        )
+        for step_size in args.evaluation_step_sizes:
+            evaluator.evaluate_step_size(step_size)
+        evaluator.evaluate_trajectories()
+    elif args.problem == 'boids':
+        raise NotImplementedError("Testing not yet implemented for boids problem")
+        evaluator = Evaluator(
+            model, 
+            train_dataloader, 
+            val_dataloader, 
+            problem_type='boids', 
+            wandb_api_key=args.wandb_api_key,
+            prior_conditioning=args.prior_conditioning
+        )
+        for step_size in args.evaluation_step_sizes:
+            evaluator.evaluate_step_size(step_size)
+        evaluator.evaluate_trajectories()
+    else:
+        raise ValueError(f"Unknown problem type: {args.problem}")
+
+def sweep_train():
+    sweep_args = parse_args()
+    wandb.init(config=wandb.config, tags=sweep_args.run_tags)
+    sweep_args.lr = wandb.config.lr
+    sweep_args.sigma = wandb.config.sigma
+    sweep_args.predict_frames, sweep_args.history_frames = wandb.config.predict_history_frame_combos
+    sweep_args.prior_conditioning = wandb.config.prior_conditioning
+    sweep_args.vector_field_conditioning = wandb.config.vector_field_conditioning
+    sweep_args.hidden_size = wandb.config.hidden_size
+    sweep_args.ch_mults = wandb.config.ch_mults
+    sweep_model = get_model(sweep_args)
+    sweep_train_dataloader, sweep_val_dataloader = get_dataloaders(sweep_args)
+    trainer = get_trainer(sweep_args, sweep_model, sweep_train_dataloader, sweep_val_dataloader)
+    trainer.train()
+
 def main():
     args = parse_args()
+    args.prior_conditioning = args.condition_on in ["prior", "both"]
+    args.vector_field_conditioning = args.condition_on in ["vector_field", "both"]
     logging.basicConfig(
-        filename='run.log',
+        filename=f'run-{args.problem}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.log',
         level=args.verbose,
         format="%(levelname)s %(asctime)s (%(filename)s, %(funcName)s) - %(message)s"
     )
@@ -109,13 +218,34 @@ def main():
     wandb_config = {
         "problem": args.problem,
         "epochs": args.epochs,
+        "patience": args.patience,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "predict_frames": args.predict_frames,
+        "history_frames": args.history_frames,
+        "hidden_size": args.hidden_size,
+        "num_layers": args.num_layers,
+        "ch_mults": args.ch_mults,
+        "sigma": args.sigma,
+        "euler_steps": args.euler_steps,
         "device": args.device,
-        "verbose": args.verbose,
-        "save": args.save,
-        "load": args.load
+        "load": args.load,
+        "skip_train": args.skip_train,
+        "skip_test": args.skip_test,
     }
+
+    if args.predict_frames % 2**(args.num_layers - 1) != 0:
+        # Because we downsample and upsample, if the number of frames is not divisible by 2 at every downsample step,
+        # The downsample will round down to get an integer number of frames, and the upsample will not correct this.
+        # Thus, after upsampling, we will get a mismatch in the number of frames and throw an error.
+        # To prevent this, we enforce that the number of frames the model gets is divisible by 2^(num_layers - 1) (since we don't
+        # up-/downsample at the first layer).
+        error_message = (f"The number of prediction_frames ({args.predict_frames}) " +
+                            f"should be divisible by 2^({args.num_layers} - 1) = {2**(args.num_layers - 1)} " +
+                            "for proper downsampling and upsampling in the model architecture. Otherwise, rounding errors may occur.")
+        logger.error(error_message)
+        raise ValueError(error_message)
+
 
     if args.wandb_api_key is not None:
         wandb.login(key=args.wandb_api_key)
@@ -125,14 +255,61 @@ def main():
     else:
         logger.warning("No Weights and Biases API key provided.")
 
-    wandb.init(project=args.problem, config=wandb_config)
-    logger.info("Weights and Biases initialized")
+    if args.sweep:
+        sweep_config = {
+            'method': 'random',
+            'metric': {'name': 'val_avg_loss', 'goal': 'minimize'},
+            'parameters': {
+                'lr': {'values': [1e-5, 1e-4]},
+                'sigma': {'min': 0.01, 'max': 0.125},
+                'predict_history_frame_combos': { # We combine them to ensure valid combos
+                    'values': [
+                        (20, 20),
+                        (20, 16),
+                        (20, 8),
+                        (12, 12),
+                        (12, 8),
+                        (12, 4)
+                    ]
+                },
+                'prior_conditioning': {'values': [True, False]},
+                'vector_field_conditioning': {'values': [True, False]},
+                'ch_mults': {
+                    'values': [
+                        [1, 2, 2],
+                        [1, 2, 4]
+                    ]
+                },
+                'hidden_size': {'values': [128, 256]},
+                'evaluation_step_sizes_cfd': {'values': [1, 2, 4, 8, 16, 32]},
+                'evaluation_step_sizes_boids': {'values': [1, 2, 4, 8, 16, 32]},
+            }
+        }
+        sweep_id = wandb.sweep(sweep_config, project=args.problem)
+        wandb.agent(sweep_id, function=sweep_train, count=args.sweep_runs)
+        wandb.finish()
+        logger.info("Sweep complete. Logs saved in run.log")
+        exit(0)
 
+    wandb.init(project=args.problem, config=wandb_config, tags=args.run_tags)
+    logger.info("Weights and Biases initialized")
     model = get_model(args)
     train_dataloader, val_dataloader = get_dataloaders(args)
-    trainer = get_trainer(args, model, train_dataloader, val_dataloader)
 
-    trainer.train()
+    if args.load:
+        if os.path.exists(f'models/{args.problem}_model.pth'):
+            model.load_state_dict(torch.load(f'models/{args.problem}_model.pth', map_location=args.device))
+            logger.info(f"Loaded model state_dict from models/{args.problem}_model.pth")
+        else:
+            logger.warning(f"No saved model found at models/{args.problem}_model.pth. Starting from scratch.")
+    if args.skip_train and not args.load:
+        logger.error("Cannot skip training without loading a model. Exiting.")
+        exit(1)
+    if not args.skip_train:
+        trainer = get_trainer(args, model, train_dataloader, val_dataloader)
+        trainer.train()
+    if not args.skip_test:
+        do_test(args, model, train_dataloader, val_dataloader)
     wandb.finish()
     logger.info("Run complete. Logs saved in run.log")
 
