@@ -2,7 +2,7 @@ import torch
 import wandb
 import matplotlib.pyplot as plt
 
-from typing import Tuple
+from typing import Tuple, List
 from torch import Tensor
 
 class Evaluator:
@@ -14,7 +14,8 @@ class Evaluator:
         The datasets need to provide the following methods:
         - `get_step_data_points(steps: int)` -> List[Tuple[Tensor, Tensor]]: To get the all pairs of data points within the same sequence that
             have an initial frame and a target frame separated by `steps` frames. This is used
-            to evaluate the prediction of `steps` steps.
+            to evaluate the prediction of `steps` steps. When this method is called with the maximum step size, 
+            it should return one data point per trajectory (the initial state).
         - `get_maximum_step_size() -> int`: To get the maximum `step` size, such that there is one data point
             per sequence.
         """
@@ -45,16 +46,24 @@ class Evaluator:
             steps: Number of steps to predict
             full_data: Whether to include training data in evaluation
             include_training_data: Whether to include training data in evaluation
+
+        Returns:
+            predictions: List of predicted final states (shape is dependent on the problem)
+            targets: List of ground truth final states (shape is dependent on the problem)
         """
         assert steps > 0, "Number of steps must be positive."
         assert steps <= self.maximum_step_size, "Number of steps must be less than or equal to the maximum step size."
 
         # Collect the data points to evaluate on
-        data_points = self.val_dataset.get_step_data_points(steps)
+        data_points: List[Tuple[Tensor, Tensor]] = self.val_dataset.get_step_data_points(steps)
         if include_training_data:
             data_points += self.train_dataset.get_step_data_points(steps)
 
         # Unpack the data points into input and target tensors
+        # Input shape for CFD: [1, C+1, frame_history, 128, 64]
+        # Target shape for CFD: [1, C+1, 1, 128, 64]
+        # Input shape for Boids: [1, 25, C]
+        # Target shape for Boids: [1, 25, C]
         inputs, targets = zip(*data_points)
         inputs = torch.stack(inputs)
         targets = torch.stack(targets)
@@ -62,13 +71,11 @@ class Evaluator:
         # Create model predictions using rollout
         predictions = []
         for input in inputs:
+            # The prediction shape should match the target shape.
+            # Prediction shape for CFD: [1, C+1, 1, 128, 64]
+            # Prediction shape for Boids: [1, 25, C]
             prediction = self._rollout(input, steps)
             predictions.append(prediction)
-
-        # Post-process predictions for cfd to extract the first frames for comparison
-        if self.problem_type == 'cfd':
-            predictions = [pred[:, :, 0, :, :] for pred in predictions]  # (B, C, W, H)
-            targets = [tgt[:, :, 0, :, :] for tgt in targets]  # (B, C, W, H)
 
         return predictions, targets
     
@@ -86,11 +93,24 @@ class Evaluator:
         """
         assert steps > 0, "Number of steps must be positive."
         
+        # Input shape for CFD: [1, C+1, frame_history, 128, 64]
+        # Input shape for Boids: [1, 25, C]
         output_state = input_state
         for _ in range(steps):
-            output_state = self._make_flow_matching_prediction(output_state)
+            if self.problem_type == 'cfd':
+                # Augment the output state with the prediction
+                # We remove the first frame of the input and append the first frame of the prediction
+                output_state = torch.cat([output_state[:, :, 1:, :, :], self._make_flow_matching_prediction(output_state)[:, :, 0:1, :, :]], dim=2)
+            if self.problem_type == 'boids':
+                # Replace the output state with the prediction
+                output_state = self._make_flow_matching_prediction(output_state)
         
-        return output_state
+        if self.problem_type == 'cfd':
+            # For CFD: Return only the last frame
+            return output_state[:, :, -1:, :, :]
+        if self.problem_type == 'boids':
+            # For boids: Return the full prediction directly
+            return output_state
     
     def _make_flow_matching_prediction(
         self, 
@@ -241,6 +261,10 @@ class Evaluator:
 
         This density is computed for both problems, hence the velocity features 
         are extracted separately for each problem.
+
+        For the cfd problem we 
+
+        For the boids problem 
         """
         # TODO: Extract the velocity features for each problem.
         if self.problem_type == 'cfd':
