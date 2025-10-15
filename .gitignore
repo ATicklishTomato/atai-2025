@@ -5,7 +5,10 @@ data/CFD/grid/concat/*
 data/boids_sensitivity/processed/*
 **/.ipynb_checkpoints/*
 **/output/*
+!assignment2/models/output/*.png
+!assignment2/models/output/*.gif
 **/wandb.login
 **/__pycache__/*
 *.log
 **/wandb/*
+assignment2/models/*.pth
