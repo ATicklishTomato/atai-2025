@@ -5,6 +5,9 @@ from torch.utils.data import Dataset
 import os
 import logging
 
+from typing import List, Tuple
+from torch import Tensor
+
 logger = logging.getLogger(__name__)
 
 class CFDDataset(Dataset):
@@ -97,6 +100,71 @@ class CFDDataset(Dataset):
         x = np.flip(x, axis=3)  # flip width dimension
         x[1] *= -1 # negate x-velocity
         return x
+
+    def get_step_data_points(self, steps: int) -> List[Tuple[Tensor, Tensor]]:
+        """
+        Get the all pairs of data points within the same sequence that have an initial frame and a target frame separated by `steps` frames.
+        Thus we want the List[(start_state, target_state)] where target_state is `steps` frames after the start_state.
+
+        We use these data points to evaluate the peformance of the model on predicting `steps` steps.
+        When this method is called with the maximum step size it should return the initial state of the trajectory (so one data point per trajectory).
+        
+        Ensure that we return data points (input, target) of shape ([1, C+1, F_hist, W, H], [1, C+1, 1, W, H]), such that
+        the index of the target frame is at position (i + (F_hist-1) + steps) if the index of the first input frame is at index i.
+        """
+        assert steps > 0, "Number of steps must be positive."
+
+        max_steps = self.get_maximum_step_size()
+        assert steps <= max_steps, "Number of steps must be less than or equal to the maximum step size."
+
+        data_points = []
+        for seq in self.sequences:
+            last_frame_index = len(seq) - 1
+            # The last frame is at index last_frame_index, hence the last start index
+            # is when (i + (F_hist-1) + steps) = last_frame_index, hence the first start index
+            # is for i = last_frame_index - (F_hist-1) - steps
+            start_indices = range(0, last_frame_index - (self.history_frames - 1) - steps)
+            for i in start_indices:
+                input_window = np.array(seq[i:i + self.history_frames])
+                target = np.array(seq[i + self.history_frames + steps - 1:i + self.history_frames + steps])  # [1, C, W, H]
+
+                # Convert to [C, F, W, H]
+                logger.debug(f"Input window shape before transpose: {input_window.shape}, target shape before transpose: {target.shape}")
+                input_seq = np.transpose(input_window, (1, 0, 2, 3))
+                target = np.transpose(target, (1, 0, 2, 3))
+
+                # Build mask channels on CPU and concatenate along channel dim
+                input_mask = self.mask.to('cpu').repeat(1, self.history_frames, 1, 1)
+                target_mask = self.mask.to('cpu').repeat(1, 1, 1, 1)
+
+                input_tensor = torch.tensor(input_seq, dtype=torch.float32)
+                target_tensor = torch.tensor(target, dtype=torch.float32)
+
+                input_state = torch.cat([input_mask, input_tensor], dim=0).unsqueeze(0)   # [1, C+1, F_hist, W, H]
+                target_state = torch.cat([target_mask, target_tensor], dim=0).unsqueeze(0) # [1, C+1, 1, W, H]
+
+                data_points.append((input_state, target_state))
+
+        return data_points
+
+    def get_maximum_step_size(self):
+        """
+        Get the maximum `step` size, such that there is one data point per sequence.
+        This is the maximum number of frames that can be predicted such that a ground truth target state is available.
+
+        The maximum step size is then the number for steps such that (i + (F_hist-1) + steps) = last_frame_index for i = 0.
+        Hence the maximum step size is last_frame_index - (F_hist-1).
+        """
+        assert len(self.sequences) > 0, "No sequences loaded."
+
+        # The lengths of each of the sequences are the same
+        last_frame_index = len(self.sequences[0]) - 1
+
+        max_step = last_frame_index - (self.history_frames - 1)
+        
+        # Ensure there is at least one valid step
+        assert max_step > 0, "Sequences are too short for any positive step size."
+        return max_step
 
 def preprocess_files():
     logger.info('Preprocessing files')
