@@ -126,9 +126,6 @@ class Evaluator:
         Prior conditioning behavior:
         - If prior_conditioning is True: Start from input + noise (conditional generation)
         - If prior_conditioning is False: Start from pure noise (unconditional generation)
-        
-        Args:
-            input: The input state (CFD: B,C,F,W,H bundle; boids: B,C,F,W,H with F=1 or similar)
             
         Returns:
             Generated prediction with same shape as input
@@ -137,6 +134,7 @@ class Evaluator:
         self.model.eval()
         
         with torch.no_grad():
+            # Shape for CFD: [1, C+1, frame_history, 128, 64]
             input = input.to(self.device)
             
             # Define initial state x based on prior_conditioning
