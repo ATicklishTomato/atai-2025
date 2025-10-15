@@ -5,6 +5,9 @@ from torch.utils.data import Dataset
 import os
 import logging
 
+from typing import List, Tuple
+from torch import Tensor
+
 logger = logging.getLogger(__name__)
 
 class CFDDataset(Dataset):
