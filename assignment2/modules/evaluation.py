@@ -33,7 +33,7 @@ class Evaluator:
         self.maximum_step_size = self.val_dataset.get_maximum_step_size() 
    
 
-    def predict_steps(self, steps: int, include_training_data: bool = False):
+    def predict_steps(self, steps: int, include_training_data: bool = False) -> Tuple[List[Tensor], List[Tensor]]:
         """
         Auto-regressively predict a sequence of steps given an initial frame.
         Returns the predicted sequence and the ground truth sequence for comparison.
@@ -174,6 +174,8 @@ class Evaluator:
         Log the performance metrics in wandb.
         """
         for include_training_data in [True, False]:
+            # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+            # For boids: ...
             predictions, targets = self.predict_steps(steps=steps, include_training_data=include_training_data)
 
             assert len(predictions) == len(targets), "Predictions and targets must have the same length."
