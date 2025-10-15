@@ -1,11 +1,12 @@
 import torch
 import wandb
+import matplotlib.pyplot as plt
 
 from typing import Tuple
 from torch import Tensor
 
 class Evaluator:
-    def __init__(self, model, train_dataset, val_dataset, wandb_api_key: str, problem_type='cfd', prior_conditioning: bool = False):
+    def __init__(self, model, train_dataset, val_dataset, args):
         """
         Provide the model, datasets, and problem type to evaluate various metrics.
         Results are logged to wandb.
@@ -21,19 +22,17 @@ class Evaluator:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
-        assert wandb_api_key is not None, "Weights and biases API key must be provided for logging."
-        self.wandb_api_key = wandb_api_key
-
-        assert problem_type in ['boids', 'cfd'], "Invalid problem_type. Must be 'boids' or 'cfd'."
-        self.problem_type = problem_type
-
-        self.prior_conditioning = prior_conditioning
+        self.problem_type = args.problem
+        self.prior_conditioning = args.prior_conditioning
+        self.euler_steps = args.euler_steps
+        self.device = args.device
+        self.sigma = args.sigma  # Noise level for flow matching generation
 
         # The training dataset and validation set have the same maximum step size.
         self.maximum_step_size = self.val_dataset.get_maximum_step_size() 
    
 
-    def predict_steps(self, steps: int, include_training_data: bool = False, euler_steps: int = 20, device: str = "cuda"):
+    def predict_steps(self, steps: int, include_training_data: bool = False):
         """
         Auto-regressively predict a sequence of steps given an initial frame.
         Returns the predicted sequence and the ground truth sequence for comparison.
@@ -45,8 +44,7 @@ class Evaluator:
         Args:
             steps: Number of steps to predict
             full_data: Whether to include training data in evaluation
-            euler_steps: Number of Euler steps for flow matching generation (CFD only)
-            device: Device to run the model on
+            include_training_data: Whether to include training data in evaluation
         """
         assert steps > 0, "Number of steps must be positive."
         assert steps <= self.maximum_step_size, "Number of steps must be less than or equal to the maximum step size."
@@ -64,7 +62,7 @@ class Evaluator:
         # Create model predictions using rollout
         predictions = []
         for input in inputs:
-            prediction = self._rollout(input, steps, euler_steps=euler_steps, device=device)
+            prediction = self._rollout(input, steps)
             predictions.append(prediction)
 
         # Post-process predictions for cfd to extract the first frames for comparison
@@ -74,7 +72,7 @@ class Evaluator:
 
         return predictions, targets
     
-    def _rollout(self, input_state: Tensor, steps: int, euler_steps: int = 20, device: str = "cuda"):
+    def _rollout(self, input_state: Tensor, steps: int):
         """
         Make an auto-regressive rollout of the model for a given number of steps.
         Return the final predicted state after the rollout.
@@ -85,23 +83,18 @@ class Evaluator:
         Args:
             input_state: The input state to start from
             steps: Number of steps to predict (used for boids)
-            euler_steps: Number of Euler steps for flow matching (used for CFD)
-            device: Device to run the model on
         """
         assert steps > 0, "Number of steps must be positive."
         
         output_state = input_state
         for _ in range(steps):
-            output_state = self._make_flow_matching_prediction(output_state, euler_steps=euler_steps, device=device)
+            output_state = self._make_flow_matching_prediction(output_state)
         
         return output_state
     
     def _make_flow_matching_prediction(
         self, 
-        input: Tensor, 
-        euler_steps: int = 20, 
-        sigma: float = 0.025, 
-        device: str = "cuda"
+        input: Tensor
     ):
         """
         Generate a single prediction using flow matching for either CFD or boids problem.
@@ -116,30 +109,27 @@ class Evaluator:
         
         Args:
             input: The input state (CFD: B,C,F,W,H bundle; boids: B,C,F,W,H with F=1 or similar)
-            euler_steps: Number of Euler integration steps for flow matching
-            sigma: Noise level for conditioning on input
-            device: Device to run the model on
             
         Returns:
             Generated prediction with same shape as input
         """
-        self.model.to(device)
+        self.model.to(self.device)
         self.model.eval()
         
         with torch.no_grad():
-            input = input.to(device)
+            input = input.to(self.device)
             
             # Define initial state x based on prior_conditioning
             if self.prior_conditioning:
                 # Conditional generation: start from noisy input
-                x = input + sigma * torch.randn_like(input).to(device)
+                x = input + self.sigma * torch.randn_like(input).to(self.device)
             else:
                 # Unconditional generation: start from pure noise
-                x = torch.randn_like(input).to(device)
+                x = torch.randn_like(input).to(self.device)
             
             # Handle padding for time bundling (CFD only)
             if self.problem_type == 'cfd':
-                noise_padding = torch.randn_like(input).to(device)
+                noise_padding = torch.randn_like(input).to(self.device)
                 padding_needed = noise_padding.shape[2] - x.shape[2]
                 
                 if padding_needed > 0:
@@ -154,7 +144,7 @@ class Evaluator:
             output = self.model.generation(
                 x=x,
                 x_hist=input, 
-                n_euler_steps=euler_steps
+                n_euler_steps=self.euler_steps
             )
         
         return output
@@ -183,7 +173,7 @@ class Evaluator:
 
         return mean_error, mean_euclidean_distance
 
-    def evaluate_trajectories(self) -> Tuple[float, float]:
+    def evaluate_trajectories(self):
         """
         Evaluate the model's performance on a trajectory.
 
@@ -198,7 +188,6 @@ class Evaluator:
                 kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
                 kl_divergence_pressure_densities, pressure_density_predictions, pressure_density_targets = self._evaluate_pressure_density(predictions, targets)
 
-                # TODO: Figure out how to log a density plot in wandb.
                 wandb.log({
                     "step_size": self.maximum_step_size,
                     "evaluation_set_size": len(predictions),
@@ -217,7 +206,6 @@ class Evaluator:
                 kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
                 kl_divergence_cluster_densities, cluster_density_predictions, cluster_density_targets = self._evaluate_cluster_density(predictions, targets)
 
-                # TODO: Figure out how to log a density plot in wandb.
                 wandb.log({
                     "step_size": self.maximum_step_size,
                     "evaluation_set_size": len(predictions),
@@ -274,6 +262,19 @@ class Evaluator:
         # Compute the velocity density of the targets.
         velocity_density_targets = torch.histc(target_velocity_features, bins=10, min=0, max=1)
 
+        # Make density plot
+        plt.figure()
+        plt.hist(prediction_velocity_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
+        plt.hist(target_velocity_features.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        plt.legend()
+        plt.title('Velocity Density')
+        plt.xlabel('Velocity Magnitude')
+        plt.ylabel('Frequency')
+        plt.savefig(f'./models/output/{self.problem_type}_velocity_density.png')
+        plt.close()
+        wandb.log({f"{self.problem_type}_velocity_density_plot":
+                       wandb.Image(f'./models/output/{self.problem_type}_velocity_density.png')})
+
         # Compute the kullback-leibler divergence between of the predicted velocity densities under the target velocity densities.
         # TODO: Check whether we need to use reduction here.
         kl_divergence = torch.nn.functional.kl_div(velocity_density_predictions, velocity_density_targets, reduction='sum')
@@ -300,6 +301,19 @@ class Evaluator:
         # Compute the pressure density of the targets.
         pressure_density_targets = torch.histc(target_pressure_features, bins=10, min=0, max=1)
 
+        # Make density plot
+        plt.figure()
+        plt.hist(prediction_pressure_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
+        plt.hist(target_pressure_features.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        plt.legend()
+        plt.title('Pressure Density')
+        plt.xlabel('Pressure')
+        plt.ylabel('Frequency')
+        plt.savefig(f'./models/output/{self.problem_type}_pressure_density.png')
+        plt.close()
+        wandb.log({f"{self.problem_type}_pressure_density_plot":
+                       wandb.Image(f'./models/output/{self.problem_type}_pressure_density.png')})
+
         # Compute the kullback-leibler divergence between of the predicted pressure densities under the target pressure densities.
         # TODO: Check whether we need to use reduction here.
         kl_divergence = torch.nn.functional.kl_div(pressure_density_predictions, pressure_density_targets, reduction='sum')
@@ -324,6 +338,20 @@ class Evaluator:
 
         # Compute the cluster density of the targets.
         cluster_density_targets = torch.histc(cluster_features_targets, bins=10, min=0, max=1)
+
+        # Make density plot
+        plt.figure()
+        plt.hist(cluster_features_predictions.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
+        plt.hist(cluster_features_targets.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        plt.legend()
+        plt.title('Cluster Density')
+        plt.xlabel('Number of Clusters')
+        plt.ylabel('Frequency')
+        plt.savefig(f'./models/output/{self.problem_type}_cluster_density.png')
+        plt.close()
+        wandb.log({f"{self.problem_type}_cluster_density_plot":
+                       wandb.Image(f'./models/output/{self.problem_type}_cluster_density.png')})
+
 
         # Compute the kullback-leibler divergence between of the predicted cluster densities under the target cluster densities.
         # TODO: Check whether we need to use reduction here.
