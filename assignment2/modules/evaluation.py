@@ -310,9 +310,12 @@ class Evaluator:
         """
         Evaluate the cluster density of the predictions.
         """
-        # TODO: Extract the cluster features for the boids problem.
-        cluster_features_predictions = self._compute_cluster_features(predictions)
-        cluster_features_targets = self._compute_cluster_features(targets)
+        # TODO: Extract the position features for the boids problem.
+        position_features_predictions = predictions
+        position_features_targets = targets
+
+        cluster_features_predictions = self._compute_cluster_features(position_features_predictions)
+        cluster_features_targets = self._compute_cluster_features(position_features_targets)
 
         assert len(cluster_features_predictions) == len(cluster_features_targets), "Cluster features and cluster features targets must have the same length."
 
@@ -328,9 +331,13 @@ class Evaluator:
 
         return kl_divergence, cluster_density_predictions, cluster_density_targets
 
-    def _compute_cluster_features(self, predictions):
+    def _compute_cluster_features(self, position_features):
         """
-        Compute the cluster features for the boids problem.
+        Compute the number of clusters found in the position features for the boids problem.
+
+        The input shape should be (N, 25, 2) with N the number of states.
+        The output shape should be (N, 1) with N the number of states.
         """
-        # TODO: Implement the cluster features for the boids problem.
-        return predictions
+        # TODO: Run a clustering algorithm on each of the position_features to determine the number of clusters
+        cluster_features = None
+        return cluster_features
