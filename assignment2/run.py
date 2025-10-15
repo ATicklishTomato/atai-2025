@@ -178,8 +178,8 @@ def do_test(args, model, train_dataloader, val_dataloader):
         # )
         evaluator = Evaluator(
             model, 
-            train_dataloader, 
-            val_dataloader, 
+            train_dataloader.dataset,
+            val_dataloader.dataset,
             args
         )
         for step_size in args.evaluation_step_sizes:

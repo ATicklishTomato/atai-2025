@@ -76,7 +76,7 @@ options:
 ```
 
 ### Running CFD
-To train and test the model belonging to the CFD problem, choose a conditioning strategy and run the corresponding command. The performance of each in terms of their mean validation loss is shown in the image below.
+To train and test the model belonging to the CFD problem, choose a conditioning strategy and run the corresponding command in the `assignment2` directory. The performance of each in terms of their mean validation loss is shown in the image below.
 ![CFD results](./assignment2/models/output/mean_validation_loss_cfds.png)
 
 **Conditional prior**
@@ -86,7 +86,7 @@ python run.py --ch_mults 1 2 2 --hidden_size 128 --lr 1e-4 --predict_frames 12 -
 ```
 To test a loaded model (saved in `assignment2/models/prior_cfd_model.pth`):
 ```bash
-python run.py --ch_mults 1 2 2 --hidden_size 128 --lr 1e-4 --predict_frames 12 --history_frames 12 --sigma 0.12 --condition_on "prior" --load --load_path "prior_cfd_model.pth" --skip_train
+python run.py --ch_mults 1 2 2 --hidden_size 128 --lr 1e-4 --predict_frames 12 --history_frames 12 --sigma 0.12 --condition_on "prior" --load --load_filename "prior_cfd_model.pth" --skip_train
 ```
 
 **Conditional vector field**
@@ -96,7 +96,7 @@ python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 -
 ```
 To test a loaded model (saved in `assignment2/models/vf_cfd_model.pth`):
 ```bash
-python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 16 --sigma 0.04 --condition_on "vector_field" --load --load_path "vf_cfd_model.pth" --skip_train
+python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 16 --sigma 0.04 --condition_on "vector_field" --load --load_filename "vf_cfd_model.pth" --skip_train
 ```
 
 **Conditional prior _and_ vector field**
@@ -106,7 +106,7 @@ python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 -
 ```
 To test a loaded model (saved in `assignment2/models/both_cfd_model.pth`):
 ```bash
-python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 20 --sigma 0.05 --condition_on "both" --load --load_path "both_cfd_model.pth" --skip_train
+python run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 20 --sigma 0.05 --condition_on "both" --load --load_filename "both_cfd_model.pth" --skip_train
 ```
 
 ## Snellius supercomputer usage

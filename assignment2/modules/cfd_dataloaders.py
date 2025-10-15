@@ -126,9 +126,10 @@ class CFDDataset(Dataset):
             start_indices = range(0, last_frame_index - (self.history_frames - 1) - steps)
             for i in start_indices:
                 input_window = np.array(seq[i:i + self.history_frames])
-                target = np.array(seq[i + (self.history_frames - 1) + steps])
+                target = np.array(seq[i + self.history_frames + steps - 1:i + self.history_frames + steps])  # [1, C, W, H]
 
                 # Convert to [C, F, W, H]
+                logger.debug(f"Input window shape before transpose: {input_window.shape}, target shape before transpose: {target.shape}")
                 input_seq = np.transpose(input_window, (1, 0, 2, 3))
                 target = np.transpose(target, (1, 0, 2, 3))
 

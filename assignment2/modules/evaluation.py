@@ -1,9 +1,12 @@
 import torch
 import wandb
 import matplotlib.pyplot as plt
+import logging
 
 from typing import Tuple, List
 from torch import Tensor
+
+logger = logging.getLogger(__name__)
 
 class Evaluator:
     def __init__(self, model, train_dataset, val_dataset, args):
@@ -30,7 +33,8 @@ class Evaluator:
         self.sigma = args.sigma  # Noise level for flow matching generation
 
         # The training dataset and validation set have the same maximum step size.
-        self.maximum_step_size = self.val_dataset.get_maximum_step_size() 
+        self.maximum_step_size = self.val_dataset.get_maximum_step_size()
+        logger.info("Evaluator initialized.")
    
 
     def predict_steps(self, steps: int, include_training_data: bool = False) -> Tuple[List[Tensor], List[Tensor]]:
@@ -59,6 +63,8 @@ class Evaluator:
         if include_training_data:
             data_points += self.train_dataset.get_step_data_points(steps)
 
+        logger.info(f"Evaluating {len(data_points)} data points for step size {steps} (include_training_data={include_training_data}).")
+
         # Unpack the data points into input and target tensors
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
         # Target shape for CFD: [1, C+1, 1, 128, 64]
@@ -68,6 +74,8 @@ class Evaluator:
         inputs = torch.stack(inputs)
         targets = torch.stack(targets)
 
+        logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
+
         # Create model predictions using rollout
         predictions = []
         for input in inputs:
@@ -76,6 +84,8 @@ class Evaluator:
             # Prediction shape for Boids: [1, 25, C]
             prediction = self._rollout(input, steps)
             predictions.append(prediction)
+
+        logger.info(f"Made predictions for {len(predictions)} data points.")
 
         return predictions, targets
     
@@ -92,10 +102,12 @@ class Evaluator:
             steps: Number of steps to predict (used for boids)
         """
         assert steps > 0, "Number of steps must be positive."
-        
+
+        logger.info(f"Rollout for {steps} steps.")
+
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
         # Input shape for Boids: [1, 25, C]
-        output_state = input_state
+        output_state = input_state.to(self.device)
         for _ in range(steps):
             if self.problem_type == 'cfd':
                 # Augment the output state with the prediction
@@ -104,7 +116,9 @@ class Evaluator:
             if self.problem_type == 'boids':
                 # Replace the output state with the prediction
                 output_state = self._make_flow_matching_prediction(output_state)
-        
+
+        logger.info(f"Rollout for {steps} steps completed.")
+
         if self.problem_type == 'cfd':
             # For CFD: Return only the last frame
             return output_state[:, :, -1:, :, :]
@@ -132,6 +146,8 @@ class Evaluator:
         """
         self.model.to(self.device)
         self.model.eval()
+
+        logger.info(f"Generating flow matching prediction for {input.shape}.")
         
         with torch.no_grad():
             # Shape for CFD: [1, C+1, frame_history, 128, 64]
@@ -164,6 +180,8 @@ class Evaluator:
                 x_hist=input, 
                 n_euler_steps=self.euler_steps
             )
+
+        logger.info(f"Flow matching prediction generated with shape {output.shape}.")
         
         return output
 
@@ -173,6 +191,7 @@ class Evaluator:
 
         Log the performance metrics in wandb.
         """
+        logger.info(f"Evaluating model performance at step size {steps}.")
         for include_training_data in [True, False]:
             # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
             # For boids: ...
@@ -183,6 +202,8 @@ class Evaluator:
             mean_error = self._evaluate_mean_error(predictions, targets)
             mean_euclidean_distance = self._evaluate_mean_euclidean_distance(predictions, targets)
 
+            logger.info("Logging step_size, evaluation_set_size, include_training_data, " +
+                        "mean_error, mean_euclidean_distance to wandb.")
             wandb.log({
                 "step_size": steps,
                 "evaluation_set_size": len(predictions),
@@ -199,6 +220,7 @@ class Evaluator:
 
         Log the performance metrics in wandb.
         """
+        logger.info(f"Evaluating model performance on full trajectories.")
         for include_training_data in [True, False]:
             predictions, targets = self.predict_steps(steps=self.maximum_step_size, include_training_data=include_training_data)
 
@@ -208,6 +230,7 @@ class Evaluator:
                 kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
                 kl_divergence_pressure_densities, pressure_density_predictions, pressure_density_targets = self._evaluate_pressure_density(predictions, targets)
 
+                logger.info("Logging trajectory evaluation metrics of cfd to wandb.")
                 wandb.log({
                     "step_size": self.maximum_step_size,
                     "evaluation_set_size": len(predictions),
@@ -226,6 +249,7 @@ class Evaluator:
                 kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
                 kl_divergence_cluster_densities, cluster_density_predictions, cluster_density_targets = self._evaluate_cluster_density(predictions, targets)
 
+                logger.info("Logging trajectory evaluation metrics of boids to wandb.")
                 wandb.log({
                     "step_size": self.maximum_step_size,
                     "evaluation_set_size": len(predictions),
@@ -286,6 +310,7 @@ class Evaluator:
         # Compute the velocity density of the targets.
         velocity_density_targets = torch.histc(target_velocity_features, bins=10, min=0, max=1)
 
+        logger.info("Making velocity density plot and logging to wandb.")
         # Make density plot
         plt.figure()
         plt.hist(prediction_velocity_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
@@ -325,6 +350,7 @@ class Evaluator:
         # Compute the pressure density of the targets.
         pressure_density_targets = torch.histc(target_pressure_features, bins=10, min=0, max=1)
 
+        logger.info("Making pressure density plot and logging to wandb.")
         # Make density plot
         plt.figure()
         plt.hist(prediction_pressure_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
@@ -363,6 +389,7 @@ class Evaluator:
         # Compute the cluster density of the targets.
         cluster_density_targets = torch.histc(cluster_features_targets, bins=10, min=0, max=1)
 
+        logger.info("Making cluster density plot and logging to wandb.")
         # Make density plot
         plt.figure()
         plt.hist(cluster_features_predictions.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
