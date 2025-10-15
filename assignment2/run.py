@@ -102,6 +102,11 @@ def parse_args():
                         action='store_true',
                         help='Load the stored model and optimizer state_dicts (if applicable) ' +
                              'before training and skip training. Default is False')
+    parser.add_argument('--load_filename',
+                        type=str,
+                        default=None,
+                        help='Filename to load the model and optimizer state_dicts from models directory. Default is None, ' +
+                             'which will load from models/{problem}_model.pth and models/{problem}_optimizer.pth')
     parser.add_argument('--skip_train',
                         action='store_true',
                         help='Skip training and only evaluate the model. Default is False')
@@ -297,7 +302,10 @@ def main():
     train_dataloader, val_dataloader = get_dataloaders(args)
 
     if args.load:
-        if os.path.exists(f'models/{args.problem}_model.pth'):
+        if args.load_filename is not None and os.path.exists(f'models/{args.load_filename}'):
+            model.load_state_dict(torch.load(f'models/{args.load_filename}', map_location=args.device))
+            logger.info(f"Loaded model state_dict from models/{args.load_filename}")
+        elif os.path.exists(f'models/{args.problem}_model.pth'):
             model.load_state_dict(torch.load(f'models/{args.problem}_model.pth', map_location=args.device))
             logger.info(f"Loaded model state_dict from models/{args.problem}_model.pth")
         else:

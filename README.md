@@ -14,10 +14,15 @@ pip install -r requirements.txt
 ```
 
 ## Running assignment 2 code
+First, ensure you are in the `assignment2` directory.
+```bash
+cd assignment2
+```
+To run the code, use the `run.py` script. You can see all options below or by running `python run.py -h`.
 ```
 usage: run.py [-h] [--problem {cfd,boids}] [--sweep] [--sweep_runs SWEEP_RUNS] [--run_tags RUN_TAGS [RUN_TAGS ...]] [--epochs EPOCHS] [--patience PATIENCE] [--batch_size BATCH_SIZE] [--lr LR] [--predict_frames PREDICT_FRAMES]
               [--history_frames HISTORY_FRAMES] [--condition_on {prior,vector_field,both}] [--hidden_size HIDDEN_SIZE] [--num_layers NUM_LAYERS] [--ch_mults CH_MULTS [CH_MULTS ...]] [--sigma SIGMA] [--euler_steps EULER_STEPS]
-              [--device DEVICE] [--use_tqdm] [--verbose {10,20,30,40}] [--save] [--load] [--skip_train] [--skip_test] [--no_save_figures] [--wandb_api_key WANDB_API_KEY]
+              [--device DEVICE] [--use_tqdm] [--verbose {10,20,30,40}] [--save] [--load] [--load_filename LOAD_FILENAME] [--skip_train] [--skip_test] [--no_save_figures] [--wandb_api_key WANDB_API_KEY]
 
 Train and test a neural network on either a cfd or a boids dataset
 
@@ -56,12 +61,34 @@ options:
                         Verbosity level for logging. Options are for DEBUG, INFO, WARNING, and ERROR, respectively. Default is INFO
   --save                Save the model and optimizer state_dicts (if applicable) after training. Default is False
   --load                Load the stored model and optimizer state_dicts (if applicable) before training and skip training. Default is False
+  --load_filename LOAD_FILENAME
+                        Filename to load the model and optimizer state_dicts from models directory. Default is None, which will load from models/{problem}_model.pth and models/{problem}_optimizer.pth
   --skip_train          Skip training and only evaluate the model. Default is False
   --skip_test           Skip testing and only train the model. Default is False
   --no_save_figures     Save any figures that are generated during testing. Default is True
   --wandb_api_key WANDB_API_KEY
                         Your personal API key for Weights and Biases. Default is None. Alternatively, you can leave this empty and store the key in a file in the root of this script called "wandb.login". This file will be
                         ignored by git. NOTE: Make sure to keep this key private and secure. Do not share it or upload it to a public repository.
+```
+
+### Running CFD
+To train and test the model belonging to the CFD problem, choose a conditioning strategy and run the corresponding command. The performance of each in terms of their mean validation loss is shown in the image below.
+![CFD results](./assignment2/models/output/mean_validation_loss_cfds.png)
+
+**Conditional prior**
+```bash
+python 	run.py --ch_mults 1 2 2 --hidden_size 128 --lr 1e-4 --predict_frames 12 --history_frames 12 --sigma 0.12 --condition_on "prior"
+```
+
+**Conditional vector field**
+
+```bash
+python 	run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 16 --sigma 0.04 --condition_on "vector_field"
+```
+
+**Conditional prior _and_ vector field**
+```bash
+python 	run.py --ch_mults 1 2 4 --hidden_size 256 --lr 1e-5 --predict_frames 20 --history_frames 20 --sigma 0.05 --condition_on "both"
 ```
 
 ## Snellius supercomputer usage
