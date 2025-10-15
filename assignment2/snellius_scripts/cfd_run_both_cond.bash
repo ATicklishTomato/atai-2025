@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH -p gpu_a100
 #SBATCH -N 1
 #SBATCH --tasks-per-node 1
