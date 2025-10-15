@@ -220,7 +220,7 @@ def main():
     args.prior_conditioning = args.condition_on in ["prior", "both"]
     args.vector_field_conditioning = args.condition_on in ["vector_field", "both"]
     args.evaluation_step_sizes = args.evaluation_step_sizes if len(args.evaluation_step_sizes) > 0 else (
-        [1, 2, 4, 8, 16, 32] if args.problem == 'cfd' else [1, 2, 4, 8, 16, 32]
+        [5, 20, 40] if args.problem == 'cfd' else [1, 2, 4, 8, 16, 32]
     )
 
     logging.basicConfig(

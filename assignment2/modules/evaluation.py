@@ -2,6 +2,7 @@ import torch
 import wandb
 import matplotlib.pyplot as plt
 import logging
+from tqdm import tqdm
 
 from typing import Tuple, List
 from torch import Tensor
@@ -31,6 +32,10 @@ class Evaluator:
         self.euler_steps = args.euler_steps
         self.device = args.device
         self.sigma = args.sigma  # Noise level for flow matching generation
+        self.use_tqdm = args.use_tqdm
+
+        if self.problem_type == 'cfd':
+            self.predict_frames = self.val_dataset.predict_frames
 
         # The training dataset and validation set have the same maximum step size.
         self.maximum_step_size = self.val_dataset.get_maximum_step_size()
@@ -73,10 +78,12 @@ class Evaluator:
         inputs, targets = zip(*data_points)
         inputs = torch.stack(inputs)
 
-        logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
+        logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets[0].shape}")
 
         # Create model predictions using rollout
         predictions = []
+        if self.use_tqdm:
+            inputs = tqdm(inputs, desc=f"Predicting for step size {steps}", leave=False)
         for input in inputs:
             # The prediction shape should match the target shape.
             # Prediction shape for CFD: [1, C+1, 1, 128, 64]
@@ -104,21 +111,25 @@ class Evaluator:
         """
         assert steps > 0, "Number of steps must be positive."
 
-        logger.info(f"Rollout for {steps} steps.")
-
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
         # Input shape for Boids: [1, 25, C]
         output_state = input_state.to(self.device)
+        steps_done = 0
         for _ in range(steps):
             if self.problem_type == 'cfd':
-                # Augment the output state with the prediction
-                # We remove the first frame of the input and append the first frame of the prediction
-                output_state = torch.cat([output_state[:, :, 1:, :, :], self._make_flow_matching_prediction(output_state)[:, :, 0:1, :, :]], dim=2)
+                # Replace the output state with the prediction
+                target_shape = (output_state.shape[0], output_state.shape[1], self.predict_frames, output_state.shape[3], output_state.shape[4])
+                output_state = self._make_flow_matching_prediction(output_state, target_shape)
+                steps_done += self.predict_frames
+                if steps_done >= steps:
+                    excess = steps_done - steps
+                    if excess > 0:
+                        # Trim the excess frames to match the exact number of steps
+                        output_state = output_state[:, :, -excess:, :, :]
+                    break
             if self.problem_type == 'boids':
                 # Replace the output state with the prediction
                 output_state = self._make_flow_matching_prediction(output_state)
-
-        logger.info(f"Rollout for {steps} steps completed.")
 
         if self.problem_type == 'cfd':
             # For CFD: Return only the last frame
@@ -129,7 +140,8 @@ class Evaluator:
     
     def _make_flow_matching_prediction(
         self, 
-        input: Tensor
+        input: Tensor,
+        target_shape = None
     ):
         """
         Generate a single prediction using flow matching for either CFD or boids problem.
@@ -163,8 +175,9 @@ class Evaluator:
                 x = torch.randn_like(input).to(self.device)
             
             # Handle padding for time bundling (CFD only)
-            if self.problem_type == 'cfd':
-                noise_padding = torch.randn_like(input).to(self.device)
+            if self.problem_type == 'cfd' and target_shape is not None:
+                # Noise like target shape
+                noise_padding = torch.randn(target_shape).to(self.device)
                 padding_needed = noise_padding.shape[2] - x.shape[2]
                 
                 if padding_needed > 0:
@@ -194,25 +207,23 @@ class Evaluator:
         Log the performance metrics in wandb.
         """
         logger.info(f"Evaluating model performance at step size {steps}.")
-        for include_training_data in [True, False]:
-            # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
-            # For boids: ...
-            predictions, targets = self.predict_steps(steps=steps, include_training_data=include_training_data)
+        # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+        # For boids: ...
+        predictions, targets = self.predict_steps(steps=steps, include_training_data=False)
 
-            assert len(predictions) == len(targets), "Predictions and targets must have the same length."
+        assert len(predictions) == len(targets), "Predictions and targets must have the same length."
 
-            mean_error = self._evaluate_mean_error(predictions, targets)
-            mean_euclidean_distance = self._evaluate_mean_euclidean_distance(predictions, targets)
+        mean_error = self._evaluate_mean_error(predictions, targets)
+        mean_euclidean_distance = self._evaluate_mean_euclidean_distance(predictions, targets)
 
-            logger.info("Logging step_size, evaluation_set_size, include_training_data, " +
-                        "mean_error, mean_euclidean_distance to wandb.")
-            wandb.log({
-                "step_size": steps,
-                "evaluation_set_size": len(predictions),
-                "include_training_data": include_training_data,
-                "mean_error": mean_error,
-                "mean_euclidean_distance": mean_euclidean_distance
-            })
+        logger.info("Logging step_size, evaluation_set_size, include_training_data, " +
+                    "mean_error, mean_euclidean_distance to wandb.")
+        wandb.log({
+            "step_size": steps,
+            "evaluation_set_size": len(predictions),
+            "mean_error": mean_error,
+            "mean_euclidean_distance": mean_euclidean_distance
+        })
 
         return mean_error, mean_euclidean_distance
 
@@ -224,50 +235,47 @@ class Evaluator:
         Log the performance metrics in wandb.
         """
         logger.info(f"Evaluating model performance on full trajectories.")
-        for include_training_data in [True, False]:
-            # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
-            # For boids: ...
-            predictions, targets = self.predict_steps(steps=self.maximum_step_size, include_training_data=include_training_data)
+        # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+        # For boids: ...
+        predictions, targets = self.predict_steps(steps=self.maximum_step_size, include_training_data=False)
 
-            assert len(predictions) == len(targets), "Predictions and targets must have the same length."
+        assert len(predictions) == len(targets), "Predictions and targets must have the same length."
 
-            if self.problem_type == 'cfd':
-                kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
-                kl_divergence_pressure_densities, pressure_density_predictions, pressure_density_targets = self._evaluate_pressure_density(predictions, targets)
+        if self.problem_type == 'cfd':
+            kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
+            kl_divergence_pressure_densities, pressure_density_predictions, pressure_density_targets = self._evaluate_pressure_density(predictions, targets)
 
-                logger.info("Logging trajectory evaluation metrics of cfd to wandb.")
-                wandb.log({
-                    "step_size": self.maximum_step_size,
-                    "evaluation_set_size": len(predictions),
-                    "include_training_data": include_training_data,
-                    "kl_divergence_velocity_densities": kl_divergence_velocity_densities,
-                    "velocity_density_predictions": velocity_density_predictions,
-                    "velocity_density_targets": velocity_density_targets,
-                    "kl_divergence_pressure_densities": kl_divergence_pressure_densities,
-                    "pressure_density_predictions": pressure_density_predictions,
-                    "pressure_density_targets": pressure_density_targets,
-                })
+            logger.info("Logging trajectory evaluation metrics of cfd to wandb.")
+            wandb.log({
+                "step_size": self.maximum_step_size,
+                "evaluation_set_size": len(predictions),
+                "kl_divergence_velocity_densities": kl_divergence_velocity_densities,
+                "velocity_density_predictions": velocity_density_predictions,
+                "velocity_density_targets": velocity_density_targets,
+                "kl_divergence_pressure_densities": kl_divergence_pressure_densities,
+                "pressure_density_predictions": pressure_density_predictions,
+                "pressure_density_targets": pressure_density_targets,
+            })
 
-                return kl_divergence_velocity_densities, kl_divergence_pressure_densities
+            return kl_divergence_velocity_densities, kl_divergence_pressure_densities
 
-            if self.problem_type == 'boids':
-                kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
-                kl_divergence_cluster_densities, cluster_density_predictions, cluster_density_targets = self._evaluate_cluster_density(predictions, targets)
+        if self.problem_type == 'boids':
+            kl_divergence_velocity_densities, velocity_density_predictions, velocity_density_targets = self._evaluate_velocity_density(predictions, targets)
+            kl_divergence_cluster_densities, cluster_density_predictions, cluster_density_targets = self._evaluate_cluster_density(predictions, targets)
 
-                logger.info("Logging trajectory evaluation metrics of boids to wandb.")
-                wandb.log({
-                    "step_size": self.maximum_step_size,
-                    "evaluation_set_size": len(predictions),
-                    "include_training_data": include_training_data,
-                    "kl_divergence_velocity_densities": kl_divergence_velocity_densities,
-                    "velocity_density_predictions": velocity_density_predictions,
-                    "velocity_density_targets": velocity_density_targets,
-                    "kl_divergence_cluster_densities": kl_divergence_cluster_densities,
-                    "cluster_density_predictions": cluster_density_predictions,
-                    "cluster_density_targets": cluster_density_targets,
-                })
+            logger.info("Logging trajectory evaluation metrics of boids to wandb.")
+            wandb.log({
+                "step_size": self.maximum_step_size,
+                "evaluation_set_size": len(predictions),
+                "kl_divergence_velocity_densities": kl_divergence_velocity_densities,
+                "velocity_density_predictions": velocity_density_predictions,
+                "velocity_density_targets": velocity_density_targets,
+                "kl_divergence_cluster_densities": kl_divergence_cluster_densities,
+                "cluster_density_predictions": cluster_density_predictions,
+                "cluster_density_targets": cluster_density_targets,
+            })
 
-                return kl_divergence_velocity_densities, kl_divergence_cluster_densities
+            return kl_divergence_velocity_densities, kl_divergence_cluster_densities
 
     def _evaluate_mean_error(self, predictions: List[Tensor], targets: List[Tensor]):
         """
@@ -278,8 +286,8 @@ class Evaluator:
         # We compute the mean error over channels [0:3] (vx, vy, pressure) for CFD; over all features for boids.
 
         # Stack lists into batched tensors
-        preds = torch.cat(predictions, dim=0)
-        targs = torch.cat(targets, dim=0)
+        preds = torch.cat(predictions, dim=0).to(self.device)
+        targs = torch.cat(targets, dim=0).to(self.device)
 
         if self.problem_type == 'cfd':
             # Select vx, vy, pressure channels
@@ -297,8 +305,8 @@ class Evaluator:
         # We compute the mean euclidean distance over the first 3 channels (vx, vy, pressure) for CFD.
         
         # Stack lists into batched tensors
-        preds = torch.cat(predictions, dim=0)
-        targs = torch.cat(targets, dim=0)
+        preds = torch.cat(predictions, dim=0).to(self.device)
+        targs = torch.cat(targets, dim=0).to(self.device)
         
         if self.problem_type == 'cfd':
             # Select vx, vy, pressure channels
