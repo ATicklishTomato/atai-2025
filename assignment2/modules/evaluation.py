@@ -72,7 +72,6 @@ class Evaluator:
         # Target shape for Boids: [1, 25, C]
         inputs, targets = zip(*data_points)
         inputs = torch.stack(inputs)
-        targets = torch.stack(targets)
 
         logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
 
@@ -86,6 +85,8 @@ class Evaluator:
             predictions.append(prediction)
 
         logger.info(f"Made predictions for {len(predictions)} data points.")
+        # Keep targets as list for consistency with predictions
+        targets = list(targets)
 
         return predictions, targets
     
@@ -188,6 +189,7 @@ class Evaluator:
     def evaluate_step_size(self, steps: int):
         """
         Evaluate the model's performance at a given step size.
+        This will result in multiple data points to evaluate on, per trajectory.
 
         Log the performance metrics in wandb.
         """
@@ -217,11 +219,14 @@ class Evaluator:
     def evaluate_trajectories(self):
         """
         Evaluate the model's performance on a trajectory.
+        This will use the maximum step size such that we have one data point per trajectory to compare.
 
         Log the performance metrics in wandb.
         """
         logger.info(f"Evaluating model performance on full trajectories.")
         for include_training_data in [True, False]:
+            # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+            # For boids: ...
             predictions, targets = self.predict_steps(steps=self.maximum_step_size, include_training_data=include_training_data)
 
             assert len(predictions) == len(targets), "Predictions and targets must have the same length."
@@ -264,57 +269,141 @@ class Evaluator:
 
                 return kl_divergence_velocity_densities, kl_divergence_cluster_densities
 
-    def _evaluate_mean_error(self, predictions, targets):
+    def _evaluate_mean_error(self, predictions: List[Tensor], targets: List[Tensor]):
         """
         Evaluate the mean error of the predictions.
         """
-        return torch.mean(predictions - targets)
+        # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+        # For boids: predictions and targets are lists of Tensors of shape [1, 25, C].
+        # We compute the mean error over channels [0:3] (vx, vy, pressure) for CFD; over all features for boids.
 
-    def _evaluate_mean_euclidean_distance(self, predictions, targets):
+        # Stack lists into batched tensors
+        preds = torch.cat(predictions, dim=0)
+        targs = torch.cat(targets, dim=0)
+
+        if self.problem_type == 'cfd':
+            # Select vx, vy, pressure channels
+            preds = preds[:, 0:3, ...]
+            targs = targs[:, 0:3, ...]
+
+        return torch.mean(preds - targs)
+
+    def _evaluate_mean_euclidean_distance(self, predictions: List[Tensor], targets: List[Tensor]):
         """
         Evaluate the mean euclidean distance between the predictions and targets.
         """
-        # Predictions and targets shape for CFD are: (N, 64, 128, 2) with N the number of data points for this step size.
-        # Predictions and targets shape for Boids are: (N, 25, 2) with N the number of data points for this step size.
-        # We compute the mean euclidean distance over the last dimension (feature dimension)
-        return torch.mean(torch.norm(predictions - targets, dim=-1))
+        # For CFD: predictions and targets are lists of Tensors of shape [1, C+1, 1, 128, 64].
+        # For boids: predictions and targets are lists of Tensors of shape [1, 25, C].
+        # We compute the mean euclidean distance over the first 3 channels (vx, vy, pressure) for CFD.
+        
+        # Stack lists into batched tensors
+        preds = torch.cat(predictions, dim=0)
+        targs = torch.cat(targets, dim=0)
+        
+        if self.problem_type == 'cfd':
+            # Select vx, vy, pressure channels
+            preds = preds[:, 0:3, ...]
+            targs = targs[:, 0:3, ...]
+        
+        return torch.mean(torch.norm(preds - targs, dim=-1))
 
-    def _evaluate_velocity_density(self, predictions, targets):
+    def _evaluate_velocity_density(self, predictions: List[Tensor], targets: List[Tensor]):
         """
         Evaluate the velocity density of the predictions.
 
         This density is computed for both problems, hence the velocity features 
         are extracted separately for each problem.
 
-        For the cfd problem we 
+        For the cfd the tensors have shape [1, C+1, 1, 128, 64] we need to extract the velocity features from the last frame.
+        In this case C=3 and we add one dimension for the mask, resulting in 4 indices for the 2nd dimension.
+        The velocity features are on the first 2 indices of the 2nd dimension.
 
         For the boids problem 
         """
-        # TODO: Extract the velocity features for each problem.
+        # Extract the velocity features for each problem.
         if self.problem_type == 'cfd':
             # The state space contains 64x128 cells each of which contain a velocity (2d) and pressure (1d).
-            prediction_velocity_features = predictions
-            target_velocity_features = targets
-            # Resulting shape: (T, 64, 128, 2) with T the number of trajectories
-            # Shape we need: (X, 2) with X the number of velocity features
+            # Input shape: [1, 4, 1, 128, 64] where dimension 1 has [vx, vy, pressure, mask]
+            # Extract velocity_x and velocity_y from indices 0 and 1 of dimension 1
+            
+            prediction_velocity_magnitudes = []
+            target_velocity_magnitudes = []
+            
+            for pred_tensor in predictions:
+                # Extract velocity components: shape [1, 1, 128, 64] each
+                vx = pred_tensor[:, 0, :, :, :]  # velocity_x
+                vy = pred_tensor[:, 1, :, :, :]  # velocity_y
+                
+                # Compute velocity magnitude: sqrt(vx^2 + vy^2)
+                velocity_magnitude = torch.sqrt(vx**2 + vy**2)
+                
+                # Flatten to get all velocity magnitudes for this tensor (128*64 values)
+                prediction_velocity_magnitudes.append(velocity_magnitude.flatten())
+            
+            for target_tensor in targets:
+                # Extract velocity components
+                vx = target_tensor[:, 0, :, :, :]
+                vy = target_tensor[:, 1, :, :, :]
+                
+                # Compute velocity magnitude
+                velocity_magnitude = torch.sqrt(vx**2 + vy**2)
+                
+                # Flatten to get all velocity magnitudes
+                target_velocity_magnitudes.append(velocity_magnitude.flatten())
+            
+            # Concatenate all velocity magnitudes into a single tensor
+            prediction_velocity_features = torch.cat(prediction_velocity_magnitudes)
+            target_velocity_features = torch.cat(target_velocity_magnitudes)
+            
         elif self.problem_type == 'boids':
-            # The state space contains 25 boids each of which contain a position (2d) and velocity (2d).
-            prediction_velocity_features = predictions
-            target_velocity_features = targets
-            # Resulting shape: (T, 25, 2) with T the number of trajectories
-            # Shape we need: (X, 2) with X the number of velocity features
+            # Extract velocity magnitudes from boids states: [pos_x, pos_y, vel_x, vel_y]
+            prediction_velocity_magnitudes = []
+            target_velocity_magnitudes = []
 
-        # Compute the velocity density of the predictions.
-        velocity_density_predictions = torch.histc(prediction_velocity_features, bins=10, min=0, max=1)
+            for pred_tensor in predictions:
+                # pred_tensor shape expected: [1, 25, C] with C >= 4
+                vx = pred_tensor[..., 2]
+                vy = pred_tensor[..., 3]
+                velocity_magnitude = torch.sqrt(vx**2 + vy**2)
+                prediction_velocity_magnitudes.append(velocity_magnitude.flatten())
 
-        # Compute the velocity density of the targets.
-        velocity_density_targets = torch.histc(target_velocity_features, bins=10, min=0, max=1)
+            for target_tensor in targets:
+                vx = target_tensor[..., 2]
+                vy = target_tensor[..., 3]
+                velocity_magnitude = torch.sqrt(vx**2 + vy**2)
+                target_velocity_magnitudes.append(velocity_magnitude.flatten())
+
+            prediction_velocity_features = torch.cat(prediction_velocity_magnitudes)
+            target_velocity_features = torch.cat(target_velocity_magnitudes)
+
+        # Build shared-bin probability histograms for proper KL comparison
+        pred = prediction_velocity_features.detach().float().cpu()
+        targ = target_velocity_features.detach().float().cpu()
+
+        combined = torch.cat([pred, targ], dim=0)
+        vmin = torch.min(combined)
+        vmax = torch.max(combined)
+        if not torch.isfinite(vmin) or not torch.isfinite(vmax):
+            vmin = torch.tensor(0.0)
+            vmax = torch.tensor(1.0)
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+        num_bins = 50
+        counts_pred = torch.histc(pred, bins=num_bins, min=float(vmin), max=float(vmax))
+        counts_targ = torch.histc(targ, bins=num_bins, min=float(vmin), max=float(vmax))
+
+        # Convert counts to probability distributions with epsilon smoothing
+        eps = 1e-8
+        velocity_density_predictions = (counts_pred + eps) / (counts_pred.sum() + eps * num_bins)
+        velocity_density_targets = (counts_targ + eps) / (counts_targ.sum() + eps * num_bins)
 
         logger.info("Making velocity density plot and logging to wandb.")
         # Make density plot
         plt.figure()
-        plt.hist(prediction_velocity_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
-        plt.hist(target_velocity_features.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        bin_edges = torch.linspace(float(vmin), float(vmax), num_bins + 1)
+        plt.hist(pred.numpy(), bins=bin_edges.numpy(), alpha=0.5, label='Predictions', density=True)
+        plt.hist(targ.numpy(), bins=bin_edges.numpy(), alpha=0.5, label='Targets', density=True)
         plt.legend()
         plt.title('Velocity Density')
         plt.xlabel('Velocity Magnitude')
@@ -324,9 +413,11 @@ class Evaluator:
         wandb.log({f"{self.problem_type}_velocity_density_plot":
                        wandb.Image(f'./models/output/{self.problem_type}_velocity_density.png')})
 
-        # Compute the kullback-leibler divergence between of the predicted velocity densities under the target velocity densities.
-        # TODO: Check whether we need to use reduction here.
-        kl_divergence = torch.nn.functional.kl_div(velocity_density_predictions, velocity_density_targets, reduction='sum')
+        # Compute KL divergence KL(P || Q) with P=pred, Q=target
+        # kl_div expects log-probabilities as input and probabilities as target
+        # To compute KL(pred || target): input=log(target), target=pred
+        log_target = torch.log(velocity_density_targets)
+        kl_divergence = torch.nn.functional.kl_div(log_target, velocity_density_predictions, reduction='sum')
 
         return kl_divergence, velocity_density_predictions, velocity_density_targets
 
@@ -337,36 +428,64 @@ class Evaluator:
         This density is computed for both problems, hence the pressure features 
         are extracted separately for each problem.
         """
-        # TODO: Extract the pressure features
-        # The state space contains 64x128 cells each of which contain a pressure (2d) and pressure (1d).
-        prediction_pressure_features = predictions
-        target_pressure_features = targets
-        # Resulting shape: (T, 64, 128, 2) with T the number of trajectories
-        # Shape we need: (X, 2) with X the number of pressure features
+        assert self.problem_type == 'cfd', "_evaluate_pressure_density is only defined for CFD."
 
-        # Compute the pressure density of the predictions.
-        pressure_density_predictions = torch.histc(prediction_pressure_features, bins=10, min=0, max=1)
+        # Extract pressure channel (index 2 of the 2nd dimension) and flatten
+        prediction_pressure_list = []
+        target_pressure_list = []
 
-        # Compute the pressure density of the targets.
-        pressure_density_targets = torch.histc(target_pressure_features, bins=10, min=0, max=1)
+        for pred_tensor in predictions:
+            pressure = pred_tensor[:, 2, :, :, :]  # shape [1, 1, 128, 64]
+            prediction_pressure_list.append(pressure.flatten())
+        for target_tensor in targets:
+            pressure = target_tensor[:, 2, :, :, :]
+            target_pressure_list.append(pressure.flatten())
 
+        prediction_pressure_features = torch.cat(prediction_pressure_list)
+        target_pressure_features = torch.cat(target_pressure_list)
+
+        # Build shared-bin probability histograms
+        pred = prediction_pressure_features.detach().float().cpu()
+        targ = target_pressure_features.detach().float().cpu()
+
+        combined = torch.cat([pred, targ], dim=0)
+        vmin = torch.min(combined)
+        vmax = torch.max(combined)
+        if not torch.isfinite(vmin) or not torch.isfinite(vmax):
+            vmin = torch.tensor(0.0)
+            vmax = torch.tensor(1.0)
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+        num_bins = 50
+        counts_pred = torch.histc(pred, bins=num_bins, min=float(vmin), max=float(vmax))
+        counts_targ = torch.histc(targ, bins=num_bins, min=float(vmin), max=float(vmax))
+
+        eps = 1e-8
+        pressure_density_predictions = (counts_pred + eps) / (counts_pred.sum() + eps * num_bins)
+        pressure_density_targets = (counts_targ + eps) / (counts_targ.sum() + eps * num_bins)
+
+        # Plot densities with shared bins
         logger.info("Making pressure density plot and logging to wandb.")
         # Make density plot
         plt.figure()
-        plt.hist(prediction_pressure_features.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
-        plt.hist(target_pressure_features.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        bin_edges = torch.linspace(float(vmin), float(vmax), num_bins + 1)
+        plt.hist(pred.numpy(), bins=bin_edges.numpy(), alpha=0.5, label='Predictions', density=True)
+        plt.hist(targ.numpy(), bins=bin_edges.numpy(), alpha=0.5, label='Targets', density=True)
         plt.legend()
         plt.title('Pressure Density')
         plt.xlabel('Pressure')
-        plt.ylabel('Frequency')
+        plt.ylabel('Density')
         plt.savefig(f'./models/output/{self.problem_type}_pressure_density.png')
         plt.close()
         wandb.log({f"{self.problem_type}_pressure_density_plot":
                        wandb.Image(f'./models/output/{self.problem_type}_pressure_density.png')})
 
-        # Compute the kullback-leibler divergence between of the predicted pressure densities under the target pressure densities.
-        # TODO: Check whether we need to use reduction here.
-        kl_divergence = torch.nn.functional.kl_div(pressure_density_predictions, pressure_density_targets, reduction='sum')
+        # Compute KL divergence KL(P || Q) with P=pred, Q=target
+        # kl_div expects log-probabilities as input and probabilities as target
+        # To compute KL(pred || target): input=log(target), target=pred
+        log_target = torch.log(pressure_density_targets)
+        kl_divergence = torch.nn.functional.kl_div(log_target, pressure_density_predictions, reduction='sum')
 
         return kl_divergence, pressure_density_predictions, pressure_density_targets
 
