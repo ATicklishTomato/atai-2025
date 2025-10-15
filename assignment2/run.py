@@ -154,13 +154,39 @@ def get_trainer(args, model, train_dataloader, val_dataloader):
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
-def do_test(args, model, val_dataloader):
+def do_test(args, model, train_dataloader, val_dataloader):
+    from modules.evaluation import Evaluator
+
     if args.problem == 'cfd':
         from modules.cfd_tester import generate_single_prediction
-        generate_single_prediction(model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
-                                   save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning)
+        generate_single_prediction(
+            model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
+            save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning
+        )
+        evaluator = Evaluator(
+            model, 
+            train_dataloader, 
+            val_dataloader, 
+            problem_type='cfd', 
+            wandb_api_key=args.wandb_api_key,
+            prior_conditioning=args.prior_conditioning
+        )
+        for step_size in args.evaluation_step_sizes:
+            evaluator.evaluate_step_size(step_size)
+        evaluator.evaluate_trajectories()
     elif args.problem == 'boids':
         raise NotImplementedError("Testing not yet implemented for boids problem")
+        evaluator = Evaluator(
+            model, 
+            train_dataloader, 
+            val_dataloader, 
+            problem_type='boids', 
+            wandb_api_key=args.wandb_api_key,
+            prior_conditioning=args.prior_conditioning
+        )
+        for step_size in args.evaluation_step_sizes:
+            evaluator.evaluate_step_size(step_size)
+        evaluator.evaluate_trajectories()
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
@@ -254,7 +280,9 @@ def main():
                         [1, 2, 4]
                     ]
                 },
-                'hidden_size': {'values': [128, 256]}
+                'hidden_size': {'values': [128, 256]},
+                'evaluation_step_sizes_cfd': {'values': [1, 2, 4, 8, 16, 32]},
+                'evaluation_step_sizes_boids': {'values': [1, 2, 4, 8, 16, 32]},
             }
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)
@@ -281,7 +309,7 @@ def main():
         trainer = get_trainer(args, model, train_dataloader, val_dataloader)
         trainer.train()
     if not args.skip_test:
-        do_test(args, model, val_dataloader)
+        do_test(args, model, train_dataloader, val_dataloader)
     wandb.finish()
     logger.info("Run complete. Logs saved in run.log")
 

@@ -10,9 +10,11 @@ def magnitude(tensor):
     return torch.sqrt(tensor[0,:,:]**2 + tensor[1,:,:]**2)
 
 @torch.no_grad()
-def generate_single_prediction(model, val_dataloader, euler_steps=20, device="cuda",
-                               save_path="./models/output/prediction.gif", save=False, sigma=0.025,
-                               condition_on_history=True):
+def generate_single_prediction(
+    model, val_dataloader, euler_steps=20, device="cuda",
+    save_path="./models/output/prediction.gif", save=False, sigma=0.025,
+    condition_on_history=True
+):
     logger.info(f"Showing prediction for {euler_steps} euler steps")
     model.to(device)
     model.eval()
