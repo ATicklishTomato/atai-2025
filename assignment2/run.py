@@ -124,6 +124,14 @@ def parse_args():
                              'This file will be ignored by git. ' +
                              'NOTE: Make sure to keep this key private and secure. Do not share it or upload it to ' +
                              'a public repository.')
+    parser.add_argument('--evaluation_step_sizes',
+                        type=int,
+                        nargs='+',
+                        default=[],
+                        help='List of step sizes to evaluate the model on during testing. Default is empty list, which will use ' +
+                             'the default step sizes for the respective problem (cfd: [1, 2, 4, 8, 16, 32], boids: [1, 2, 4, 8, 16, 32]). ' +
+                             'Example usage: --evaluation_step_sizes 1 2 4'
+                        )
     return parser.parse_args()
 
 def get_model(args):
@@ -163,18 +171,16 @@ def do_test(args, model, train_dataloader, val_dataloader):
     from modules.evaluation import Evaluator
 
     if args.problem == 'cfd':
-        from modules.cfd_tester import generate_single_prediction
-        generate_single_prediction(
-            model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
-            save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning
-        )
+        # from modules.cfd_tester import generate_single_prediction
+        # generate_single_prediction(
+        #     model, val_dataloader, euler_steps=args.euler_steps, device=args.device,
+        #     save=args.no_save_figures, sigma=args.sigma, condition_on_history=args.prior_conditioning
+        # )
         evaluator = Evaluator(
             model, 
             train_dataloader, 
             val_dataloader, 
-            problem_type='cfd', 
-            wandb_api_key=args.wandb_api_key,
-            prior_conditioning=args.prior_conditioning
+            args
         )
         for step_size in args.evaluation_step_sizes:
             evaluator.evaluate_step_size(step_size)
@@ -184,10 +190,8 @@ def do_test(args, model, train_dataloader, val_dataloader):
         evaluator = Evaluator(
             model, 
             train_dataloader, 
-            val_dataloader, 
-            problem_type='boids', 
-            wandb_api_key=args.wandb_api_key,
-            prior_conditioning=args.prior_conditioning
+            val_dataloader,
+            args
         )
         for step_size in args.evaluation_step_sizes:
             evaluator.evaluate_step_size(step_size)
@@ -212,8 +216,13 @@ def sweep_train():
 
 def main():
     args = parse_args()
+    # Set derived args
     args.prior_conditioning = args.condition_on in ["prior", "both"]
     args.vector_field_conditioning = args.condition_on in ["vector_field", "both"]
+    args.evaluation_step_sizes = args.evaluation_step_sizes if len(args.evaluation_step_sizes) > 0 else (
+        [1, 2, 4, 8, 16, 32] if args.problem == 'cfd' else [1, 2, 4, 8, 16, 32]
+    )
+
     logging.basicConfig(
         filename=f'run-{args.problem}-{datetime.now().strftime("%Y%m%d-%H%M%S")}.log',
         level=args.verbose,
@@ -285,9 +294,7 @@ def main():
                         [1, 2, 4]
                     ]
                 },
-                'hidden_size': {'values': [128, 256]},
-                'evaluation_step_sizes_cfd': {'values': [1, 2, 4, 8, 16, 32]},
-                'evaluation_step_sizes_boids': {'values': [1, 2, 4, 8, 16, 32]},
+                'hidden_size': {'values': [128, 256]}
             }
         }
         sweep_id = wandb.sweep(sweep_config, project=args.problem)
