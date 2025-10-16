@@ -189,7 +189,11 @@ class Evaluator:
             input = input.to(self.device)
             
             # Define initial state x based on prior_conditioning
-            if self.prior_conditioning:
+            if self.problem_type == 'boids' and self.prior_conditioning:
+                x = torch.zeros_like(input)
+                x[:, :, :2] = input[:, :, :2]  + self.sigma * torch.randn_like(input[:, :, :2]).to(self.device)
+                x[:, :, 2:] = input[:, :, 2:]  + self.sigma / 100 * torch.randn_like(input[:, :, 2:]).to(self.device)
+            elif self.prior_conditioning:
                 # Conditional generation: start from noisy input
                 x = input + self.sigma * torch.randn_like(input).to(self.device)
             else:
