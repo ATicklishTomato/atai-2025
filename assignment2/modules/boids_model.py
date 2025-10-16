@@ -14,7 +14,12 @@ class GeometricFlowMatchingModel(torch.nn.Module):
     def forward(self, t: Tensor, data_t: Data, data_c: Data) -> Tensor:
         raise NotImplementedError("This method should be implemented in a subclass")
 
-    def generate(self, data_c: Data, data_0: Data, n_euler_steps: int, t_start=0.0, t_end=1.0):
+    def generation(self, x: Tensor, x_hist: Tensor, n_euler_steps: int, t_start=0.0, t_end=1.0):
+        data_c, data_0 = x[0], x_hist[0]
+        edge_index = torch.tensor([[i, j] for i in range(data_c.shape[0]) for j in range(data_c.shape[0]) if i != j], dtype=torch.long).t().contiguous()
+        data_c = Data(x=data_c, edge_index=edge_index).to(x.device)
+        data_0 = data_c.clone()
+
         time_steps = torch.linspace(t_start, t_end, n_euler_steps + 1).to(data_0.x.device)
         data_t = data_0.clone()
 
@@ -22,7 +27,7 @@ class GeometricFlowMatchingModel(torch.nn.Module):
             data_t.x += (time_steps[i+1] - time_steps[i]) * self(t=time_steps[i].unsqueeze(-1), data_t=data_t, data_c=data_c)
             data_t.x[:, :2] %= 1.0
 
-        return data_t.x
+        return data_t.x.unsqueeze(0)
 
 
 class EGNNLayer(torch.nn.Module):
