@@ -5,6 +5,18 @@ import numpy as np
 from typing import List, Tuple
 from torch import Tensor
 
+# Data fusion code for the CFD dataset
+# base_in = '../../data/CFD/grid/loose/'
+# base_out2 = '../../data/CFD/grid/concat/'
+# os.makedirs(base_out2, exist_ok=True)
+# for Re in [100,150,200,250,300,350,400]:
+#     u = np.load(f"{base_in}u_grid_Re{Re}.npy")
+#     v = np.load(f"{base_in}v_grid_Re{Re}.npy")
+#     p = np.load(f"{base_in}p_grid_Re{Re}.npy")
+#     concat = np.stack([u, v, p], axis=1)
+#     filename_save = f"{base_out2}uvp_grid_Re{Re}.npy"
+#     np.save(filename_save, concat)
+
 class CFDBaselineDataset(Dataset):
     def __init__(self, filenames, flip_augmentation=False, timesample=1):
         self.sequences = []
@@ -112,7 +124,6 @@ class CFDBaselineDataset(Dataset):
         # steps such that a target exists for i=0 is (T - 1).
         last_frame_index = self.sequences[0].shape[0] - 1
         return last_frame_index
-
 
 
 class DoubleConv(nn.Module):

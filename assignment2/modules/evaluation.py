@@ -109,8 +109,16 @@ class Evaluator:
         output_state = input_state.to(self.device)
         steps_done = 0
         for _ in range(steps):
-            if self.baseline:
-                # Replace the output state with the prediction
+            if self.problem_type == 'cfd' and self.baseline:
+                # For CFD baseline, preserve the mask channel
+                # Extract mask channel (last channel) before prediction
+                mask_channel = output_state[:, -1:, :, :]  # [1, 1, H, W]
+                # Make prediction (returns 3 channels: u, v, p)
+                output_state = self._make_baseline_prediction(output_state)
+                # Re-attach mask channel to maintain 4 channels for next iteration
+                output_state = torch.cat([output_state, mask_channel], dim=1)  # [1, 4, H, W]
+            if self.problem_type == 'boids' and self.baseline:
+                # For Boids baseline, just make prediction
                 output_state = self._make_baseline_prediction(output_state)
             if self.problem_type == 'cfd' and not self.baseline:
                 # Replace the output state with the prediction
@@ -343,6 +351,11 @@ class Evaluator:
         """
         # Extract the velocity features for each problem.
         if self.problem_type == 'cfd':
+            if self.baseline:
+                # Update baseline predictions and targets shape to match time bundling dimensions: [1, C, 128, 64] -> [1, C, 1, 128, 64]
+                predictions = [pred.unsqueeze(2) for pred in predictions]
+                targets = [target.unsqueeze(2) for target in targets]
+
             # The state space contains 64x128 cells each of which contain a velocity (2d) and pressure (1d).
             # Input shape: [1, 4, 1, 128, 64] where dimension 1 has [vx, vy, pressure, mask]
             # Extract velocity_x and velocity_y from indices 0 and 1 of dimension 1
@@ -429,10 +442,13 @@ class Evaluator:
         plt.title('Velocity Density')
         plt.xlabel('Velocity Magnitude')
         plt.ylabel('Frequency')
-        plt.savefig(f'./models/output/{self.problem_type}_velocity_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_velocity_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_velocity_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_velocity_density.png')})
+        wandb.log({
+            f"{self.problem_type}_velocity_density_plot_{baseline_suffix}":
+                wandb.Image(f'./models/output/{self.problem_type}_velocity_density_{baseline_suffix}.png')
+        })
 
         # Compute KL divergence KL(P || Q) with P=pred, Q=target
         # kl_div expects log-probabilities as input and probabilities as target
@@ -450,6 +466,11 @@ class Evaluator:
         are extracted separately for each problem.
         """
         assert self.problem_type == 'cfd', "_evaluate_pressure_density is only defined for CFD."
+
+        if self.baseline:
+            # Update baseline predictions and targets shape to match time bundling dimensions: [1, C, 128, 64] -> [1, C, 1, 128, 64]
+            predictions = [pred.unsqueeze(2) for pred in predictions]
+            targets = [target.unsqueeze(2) for target in targets]
 
         # Extract pressure channel (index 2 of the 2nd dimension) and flatten
         prediction_pressure_list = []
@@ -497,10 +518,13 @@ class Evaluator:
         plt.title('Pressure Density')
         plt.xlabel('Pressure')
         plt.ylabel('Density')
-        plt.savefig(f'./models/output/{self.problem_type}_pressure_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_pressure_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_pressure_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_pressure_density.png')})
+        wandb.log({
+            f"{self.problem_type}_pressure_density_plot_{baseline_suffix}":
+                wandb.Image(f'./models/output/{self.problem_type}_pressure_density_{baseline_suffix}.png')
+        })
 
         # Compute KL divergence KL(P || Q) with P=pred, Q=target
         # kl_div expects log-probabilities as input and probabilities as target

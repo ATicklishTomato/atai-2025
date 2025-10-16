@@ -8,24 +8,29 @@ from modules.evaluation import Evaluator
 from types import SimpleNamespace
 from pathlib import Path
 
+# Change to script directory to ensure relative paths work
+script_dir = Path(__file__).resolve().parent
+os.chdir(script_dir)
+
 args = {
-    "evaluation_step_sizes": [1],
+    "evaluation_step_sizes": [5, 20, 40],
     "problem": "cfd",
     "prior_conditioning": True,
-    "euler_steps": 20,
+    "euler_steps": 0,
     "device": "cuda",
-    "sigma": 0.025,
+    "sigma": 0,
     "use_tqdm": False,
     "wandb_api_key": "a638f884eba75c05c95730b04b2f27f7260503bb",
 }
 args = SimpleNamespace(**args)
 
 # Initialize datasets
-datafolder_path = Path(__file__).resolve().parent / 'data' / 'CFD' / 'grid' / 'concat'
-train_files = list(datafolder_path.glob('uvp_grid_Re*.npy'))
-val_files = list(datafolder_path.glob('uvp_grid_Re*.npy'))
+datafolder_path = Path(__file__).resolve().parents[1] / 'data' / 'CFD' / 'grid' / 'concat'
+train_files = list(sorted(datafolder_path.glob('uvp_grid_Re*.npy')))
+val_files = list(sorted(datafolder_path.glob('uvp_grid_Re*.npy')))
 train_dataset = CFDBaselineDataset(train_files, flip_augmentation=False, timesample=20)
 val_dataset = CFDBaselineDataset(val_files, flip_augmentation=False, timesample=20)
+
 
 # Initialize model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,7 +48,7 @@ elif args.wandb_api_key is not None:
     wandb.login(key=args.wandb_api_key)
 else:
     print("No Weights and Biases API key provided.")
-wandb.init(project=f"{args.problem}_baseline", config=args, tags=[f'{args.problem}_baseline'])
+wandb.init(entity="atai-apple-juice", project=f"{args.problem}_baseline", config=args, tags=[f'{args.problem}_baseline'])
 
 # Evaluate the baseline model
 evaluator = Evaluator(
