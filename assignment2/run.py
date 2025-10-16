@@ -141,7 +141,7 @@ def get_model(args):
                          condition_on_history=args.vector_field_conditioning)
     elif args.problem == 'boids':
         from modules.boids_model import BoidsModel
-        model = BoidsModel(args)
+        model = BoidsModel(args.hidden_size, args.hidden_size, args.hidden_size, args.num_layers)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
     return model

@@ -1,4 +1,4 @@
-from os import listdir, path
+from os import listdir, path, pardir
 
 import numpy as np
 
@@ -11,7 +11,7 @@ from tqdm import trange
 
 # CONSTANTS 
 DOMAIN_SIZE = 1000
-DATA_FOLDER = path.join('data', 'boids')
+DATA_FOLDER = path.join(pardir, 'data', 'boids')
 RAW_DATA_FOLDER = path.join(DATA_FOLDER, 'raw', '')
 PROCESSED_DATA_FOLDER = path.join(DATA_FOLDER, 'processed', '')
 

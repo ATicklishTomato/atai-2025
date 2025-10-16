@@ -1,12 +1,13 @@
 import torch
+import numpy as np
 import wandb
 import logging
 
 from tqdm import tqdm
 
-from boids_helper_functions import pbc_direction
-from boids_dataloaders import BoidsDataset
-from boids_model import BoidsModel
+from .boids_helper_functions import pbc_direction
+from .boids_dataloaders import BoidsDataset
+from .boids_model import BoidsModel
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class BoidsTrainer():
 
     def train(self):
         # Implement the training loop
-        wandb.watch(self.model, log='all')
+        wandb.watch(self.VF, log='all')
         logger.info("Model watched by Weights and Biases")
 
         n_train_samples = len(self.train_dataset)
@@ -118,7 +119,7 @@ class BoidsTrainer():
                     val_losses.append(loss.item())
             
             # Log results
-            wandb.log({"train_avg_loss": torch.mean(train_losses), "val_avg_loss": torch.mean(val_losses)})
+            wandb.log({"train_avg_loss": np.mean(train_losses), "val_avg_loss": np.mean(val_losses)})
 
         # Save the final model
         logger.info("Training completed.")
