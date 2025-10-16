@@ -8,6 +8,9 @@ from torch_geometric.loader import DataLoader
 
 from tqdm import trange
 
+from typing import List, Tuple
+from torch import Tensor
+
 
 # CONSTANTS 
 DOMAIN_SIZE = 1000
@@ -78,6 +81,76 @@ class BoidsDataset(InMemoryDataset):
     
     def __repr__(self):
         return f'{self.__class__.__name__}({len(self)})'
+    
+    def get_step_data_points(self, steps: int) -> List[Tuple[Tensor, Tensor]]:
+        """
+        Get all pairs of data points within the same trajectory that have an initial state 
+        and a target state separated by `steps` timesteps.
+        
+        Returns List[(input_state, target_state)] where target_state is `steps` timesteps 
+        after the input_state.
+        
+        We use these data points to evaluate the performance of the model on predicting `steps` steps.
+        When this method is called with the maximum step size, it should return one data point 
+        per trajectory (initial state to final state).
+        
+        Args:
+            steps: Number of timesteps between input and target states
+            
+        Returns:
+            List of (input_state, target_state) tuples, each with shape [1, 25, 4]
+        """
+        assert steps > 0, "Number of steps must be positive."
+        
+        max_steps = self.get_maximum_step_size()
+        assert steps <= max_steps, f"Number of steps ({steps}) must be less than or equal to the maximum step size ({max_steps})."
+        
+        data_points = []
+        
+        # Load raw trajectories and apply the same transform
+        for raw_filename in self.raw_file_names:
+            # Load the raw trajectory
+            trajectory = np.load(self.raw_data_path + raw_filename)
+            
+            # Apply the same transform that was used during processing
+            if self.transform is not None:
+                trajectory = self.transform(trajectory)
+            
+            # trajectory shape: [timesteps, 25, 4]
+            total_timesteps = trajectory.shape[0]
+            
+            # For each valid starting index, create a (input, target) pair
+            # Valid start indices: from 0 to (total_timesteps - steps - 1) inclusive
+            for t in range(total_timesteps - steps):
+                input_state = trajectory[t]        # [25, 4]
+                target_state = trajectory[t + steps]  # [25, 4]
+                
+                # Convert to tensors and add batch dimension
+                input_tensor = torch.tensor(input_state, dtype=torch.float32).unsqueeze(0)   # [1, 25, 4]
+                target_tensor = torch.tensor(target_state, dtype=torch.float32).unsqueeze(0) # [1, 25, 4]
+                
+                data_points.append((input_tensor, target_tensor))
+        
+        return data_points
+    
+    def get_maximum_step_size(self) -> int:
+        """
+        Get the maximum step size such that there is one data point per trajectory.
+        This is the maximum number of timesteps that can be predicted such that a 
+        ground truth target state is available.
+        
+        For boids trajectories of length T (with indices 0 to T-1), the maximum step 
+        size is T-1, allowing prediction from frame 0 to frame T-1.
+        
+        Returns:
+            Maximum step size (int)
+        """
+        # All trajectories have the same length (self.timesteps)
+        # The maximum step size is from frame 0 to the last frame
+        max_step = self.timesteps - 1
+        
+        assert max_step > 0, "Timesteps value is too small for any positive step size."
+        return max_step
 
 
 def get_boids_datasets():

@@ -3,6 +3,7 @@ import wandb
 import matplotlib.pyplot as plt
 import logging
 from tqdm import tqdm
+from sklearn.cluster import DBSCAN
 
 from typing import Tuple, List
 from torch import Tensor
@@ -66,8 +67,8 @@ class Evaluator:
         # Unpack the data points into input and target tensors
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
         # Target shape for CFD: [1, C+1, 1, 128, 64]
-        # Input shape for Boids: [1, 25, C]
-        # Target shape for Boids: [1, 25, C]
+        # Input shape for Boids: [1, 25, 4] where 4 = [pos_x, pos_y, vel_x, vel_y]
+        # Target shape for Boids: [1, 25, 4]
         inputs, targets = zip(*data_points)
         inputs = torch.stack(inputs)
 
@@ -80,7 +81,7 @@ class Evaluator:
         for input in inputs:
             # The prediction shape should match the target shape.
             # Prediction shape for CFD: [1, C+1, 1, 128, 64]
-            # Prediction shape for Boids: [1, 25, C]
+            # Prediction shape for Boids: [1, 25, 4]
             prediction = self._rollout(input, steps)
             predictions.append(prediction)
 
@@ -105,7 +106,7 @@ class Evaluator:
         assert steps > 0, "Number of steps must be positive."
 
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
-        # Input shape for Boids: [1, 25, C]
+        # Input shape for Boids: [1, 25, 4]
         output_state = input_state.to(self.device)
         steps_done = 0
         for _ in range(steps):
@@ -347,7 +348,9 @@ class Evaluator:
         In this case C=3 and we add one dimension for the mask, resulting in 4 indices for the 2nd dimension.
         The velocity features are on the first 2 indices of the 2nd dimension.
 
-        For the boids problem 
+        For the boids problem, the tensors have shape [1, 25, 4] where the 25 is the number of boids
+        and 4 is the number of features: [pos_x, pos_y, vel_x, vel_y].
+        The velocity features are on indices 2 and 3 of the last dimension.
         """
         # Extract the velocity features for each problem.
         if self.problem_type == 'cfd':
@@ -537,40 +540,54 @@ class Evaluator:
     def _evaluate_cluster_density(self, predictions, targets):
         """
         Evaluate the cluster density of the predictions.
+        
+        For boids, predictions and targets are lists of Tensors of shape [1, 25, 4]
+        where features are [pos_x, pos_y, vel_x, vel_y].
+        We extract position features (first 2 dimensions) for clustering.
         """
-        # TODO: Extract the position features for the boids problem.
-        position_features_predictions = predictions
-        position_features_targets = targets
+        # Extract the position features for the boids problem.
+        # Each tensor is [1, 25, 4], we want [1, 25, 2] with just positions
+        position_features_predictions = [pred[..., :2] for pred in predictions]
+        position_features_targets = [target[..., :2] for target in targets]
 
         cluster_features_predictions = self._compute_cluster_features(position_features_predictions)
         cluster_features_targets = self._compute_cluster_features(position_features_targets)
 
         assert len(cluster_features_predictions) == len(cluster_features_targets), "Cluster features and cluster features targets must have the same length."
 
-        # Compute the cluster density of the predictions.
-        cluster_density_predictions = torch.histc(cluster_features_predictions, bins=10, min=0, max=1)
-
-        # Compute the cluster density of the targets.
-        cluster_density_targets = torch.histc(cluster_features_targets, bins=10, min=0, max=1)
+        # Determine the range for histogram bins based on combined data
+        combined = torch.cat([cluster_features_predictions, cluster_features_targets], dim=0)
+        max_clusters = int(torch.max(combined).item())
+        
+        # Compute the cluster density histograms with proper normalization
+        eps = 1e-8
+        num_bins = min(max_clusters + 1, 10)  # Use at most 10 bins
+        counts_pred = torch.histc(cluster_features_predictions.float(), bins=num_bins, min=0, max=max(max_clusters, 1))
+        counts_targ = torch.histc(cluster_features_targets.float(), bins=num_bins, min=0, max=max(max_clusters, 1))
+        
+        # Convert to probability distributions with epsilon smoothing
+        cluster_density_predictions = (counts_pred + eps) / (counts_pred.sum() + eps * num_bins)
+        cluster_density_targets = (counts_targ + eps) / (counts_targ.sum() + eps * num_bins)
 
         logger.info("Making cluster density plot and logging to wandb.")
         # Make density plot
         plt.figure()
-        plt.hist(cluster_features_predictions.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
-        plt.hist(cluster_features_targets.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        plt.hist(cluster_features_predictions.cpu().numpy(), bins=num_bins, alpha=0.5, label='Predictions', range=(0, max(max_clusters, 1)))
+        plt.hist(cluster_features_targets.cpu().numpy(), bins=num_bins, alpha=0.5, label='Targets', range=(0, max(max_clusters, 1)))
         plt.legend()
         plt.title('Cluster Density')
         plt.xlabel('Number of Clusters')
         plt.ylabel('Frequency')
-        plt.savefig(f'./models/output/{self.problem_type}_cluster_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_cluster_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_cluster_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_cluster_density.png')})
+        wandb.log({f"{self.problem_type}_cluster_density_plot_{baseline_suffix}":
+                       wandb.Image(f'./models/output/{self.problem_type}_cluster_density_{baseline_suffix}.png')})
 
-
-        # Compute the kullback-leibler divergence between of the predicted cluster densities under the target cluster densities.
-        # TODO: Check whether we need to use reduction here.
-        kl_divergence = torch.nn.functional.kl_div(cluster_density_predictions, cluster_density_targets, reduction='sum')
+        # Compute KL divergence KL(pred || target)
+        # kl_div expects log-probabilities as input and probabilities as target
+        log_target = torch.log(cluster_density_targets)
+        kl_divergence = torch.nn.functional.kl_div(log_target, cluster_density_predictions, reduction='sum')
 
         return kl_divergence, cluster_density_predictions, cluster_density_targets
 
@@ -578,9 +595,43 @@ class Evaluator:
         """
         Compute the number of clusters found in the position features for the boids problem.
 
-        The input shape should be (N, 25, 2) with N the number of states.
-        The output shape should be (N, 1) with N the number of states.
+        Uses DBSCAN clustering algorithm to identify spatial clusters in boid positions.
+        The input is a list of tensors, each with shape [1, 25, 2] representing positions.
+        The output is a tensor of shape [N] with N the number of states, containing cluster counts.
+        
+        DBSCAN parameters:
+        - eps=0.1: Maximum distance for neighborhood (tuned for normalized [0,1] positions)
+        - min_samples=2: Minimum 2 boids to form a cluster (allows pairs)
+        
+        Args:
+            position_features: List of tensors with shape [1, 25, 2]
+            
+        Returns:
+            cluster_counts: Tensor of shape [N] containing the number of clusters for each state
         """
-        # TODO: Run a clustering algorithm on each of the position_features to determine the number of clusters
-        cluster_features = None
-        return cluster_features
+        cluster_counts = []
+        
+        for pos_tensor in position_features:
+            # pos_tensor shape: [1, 25, 2]
+            # Remove batch dimension and convert to numpy for sklearn
+            positions = pos_tensor.squeeze(0).cpu().numpy()  # [25, 2]
+            
+            # Run DBSCAN clustering
+            # eps is the maximum distance between two samples to be considered in the same neighborhood
+            # For normalized positions (0-1), use a small eps value
+            # min_samples is the minimum number of samples in a neighborhood to form a cluster
+            # Using min_samples=2 to allow pairs of boids to form clusters
+            clustering = DBSCAN(eps=0.1, min_samples=2).fit(positions)
+            
+            # Get cluster labels (-1 means noise/outlier)
+            labels = clustering.labels_
+            
+            # Count the number of unique clusters (excluding noise labeled as -1)
+            num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+            
+            cluster_counts.append(num_clusters)
+        
+        # Convert to tensor
+        cluster_counts = torch.tensor(cluster_counts, dtype=torch.float32)
+        
+        return cluster_counts

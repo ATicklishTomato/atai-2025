@@ -31,7 +31,6 @@ val_files = list(sorted(datafolder_path.glob('uvp_grid_Re*.npy')))
 train_dataset = CFDBaselineDataset(train_files, flip_augmentation=False, timesample=20)
 val_dataset = CFDBaselineDataset(val_files, flip_augmentation=False, timesample=20)
 
-
 # Initialize model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CFDBaselineModel(in_channels=4, out_channels=3, base_channels=64, mult=[1, 2, 4, 8]).to(device)

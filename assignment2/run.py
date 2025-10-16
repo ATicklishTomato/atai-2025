@@ -186,7 +186,6 @@ def do_test(args, model, train_dataloader, val_dataloader):
             evaluator.evaluate_step_size(step_size)
         evaluator.evaluate_trajectories()
     elif args.problem == 'boids':
-        raise NotImplementedError("Testing not yet implemented for boids problem")
         evaluator = Evaluator(
             model, 
             train_dataloader, 
