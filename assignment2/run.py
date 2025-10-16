@@ -141,7 +141,7 @@ def get_model(args):
                          condition_on_history=args.vector_field_conditioning)
     elif args.problem == 'boids':
         from modules.boids_model import BoidsModel
-        model = BoidsModel(args)
+        model = BoidsModel(args.hidden_size, args.hidden_size, args.hidden_size, args.num_layers)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
     return model
@@ -152,8 +152,8 @@ def get_dataloaders(args):
         return get_cfd_dataloaders(predict_frames=args.predict_frames, history_frames=args.history_frames,
                                    batch_size=args.batch_size)
     elif args.problem == 'boids':
-        from modules.boids_dataloaders import get_boids_dataloaders
-        return get_boids_dataloaders(args)
+        from modules.boids_dataloaders import get_boids_datasets
+        return get_boids_datasets()
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
