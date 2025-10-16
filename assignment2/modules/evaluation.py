@@ -10,22 +10,15 @@ from torch import Tensor
 logger = logging.getLogger(__name__)
 
 class Evaluator:
-    def __init__(self, model, train_dataset, val_dataset, args):
+    def __init__(self, model, train_dataset, val_dataset, args, baseline: bool = False):
         """
-        Provide the model, datasets, and problem type to evaluate various metrics.
+        Provide the model, datasets, baseline, and problem type to evaluate various metrics.
         Results are logged to wandb.
-
-        The datasets need to provide the following methods:
-        - `get_step_data_points(steps: int)` -> List[Tuple[Tensor, Tensor]]: To get the all pairs of data points within the same sequence that
-            have an initial frame and a target frame separated by `steps` frames. This is used
-            to evaluate the prediction of `steps` steps. When this method is called with the maximum step size, 
-            it should return one data point per trajectory (the initial state).
-        - `get_maximum_step_size() -> int`: To get the maximum `step` size, such that there is one data point
-            per sequence.
         """
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.baseline = baseline
 
         self.problem_type = args.problem
         self.prior_conditioning = args.prior_conditioning
@@ -34,7 +27,7 @@ class Evaluator:
         self.sigma = args.sigma  # Noise level for flow matching generation
         self.use_tqdm = args.use_tqdm
 
-        if self.problem_type == 'cfd':
+        if self.problem_type == 'cfd' and not self.baseline:
             self.predict_frames = self.val_dataset.predict_frames
 
         # The training dataset and validation set have the same maximum step size.
@@ -116,7 +109,10 @@ class Evaluator:
         output_state = input_state.to(self.device)
         steps_done = 0
         for _ in range(steps):
-            if self.problem_type == 'cfd':
+            if self.baseline:
+                # Replace the output state with the prediction
+                output_state = self._make_baseline_prediction(output_state)
+            if self.problem_type == 'cfd' and not self.baseline:
                 # Replace the output state with the prediction
                 target_shape = (output_state.shape[0], output_state.shape[1], self.predict_frames, output_state.shape[3], output_state.shape[4])
                 output_state = self._make_flow_matching_prediction(output_state, target_shape)
@@ -127,17 +123,34 @@ class Evaluator:
                         # Trim the excess frames to match the exact number of steps
                         output_state = output_state[:, :, -excess:, :, :]
                     break
-            if self.problem_type == 'boids':
+            if self.problem_type == 'boids' and not self.baseline:
                 # Replace the output state with the prediction
                 output_state = self._make_flow_matching_prediction(output_state)
 
-        if self.problem_type == 'cfd':
+        if self.problem_type == 'cfd' and not self.baseline:
             # For CFD: Return only the last frame
             return output_state[:, :, -1:, :, :]
-        if self.problem_type == 'boids':
+        else:
             # For boids: Return the full prediction directly
+            # For baseline: Return the full prediction directly
             return output_state
     
+    def _make_baseline_prediction(
+        self, 
+        input: Tensor,
+    ):
+        """
+        Generate a single prediction using the baseline model for either CFD or boids problem.
+        """
+        self.model.to(self.device)
+        self.model.eval()
+
+        logger.info(f"Generating baseline prediction for {input.shape}.")
+
+        with torch.no_grad():
+            input = input.to(self.device)
+            return self.model(input)
+
     def _make_flow_matching_prediction(
         self, 
         input: Tensor,
