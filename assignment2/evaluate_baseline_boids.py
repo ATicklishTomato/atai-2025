@@ -1,9 +1,9 @@
 import torch
 import wandb
 import os
+import glob
 
-from modules.boids_model import BoidsModel
-from modules.boids_dataloaders import get_boids_datasets
+from modules.boids_model_baseline import BoidsBaselineModel, BoidsBaselineDataset
 from modules.evaluation import Evaluator
 
 from types import SimpleNamespace
@@ -14,7 +14,7 @@ script_dir = Path(__file__).resolve().parent
 os.chdir(script_dir)
 
 args = {
-    "evaluation_step_sizes": [5, 20, 40],
+    "evaluation_step_sizes": [5],
     "problem": "boids",
     "prior_conditioning": False,  # Not used for baseline, but required by Evaluator
     "euler_steps": 0,  # Not used for baseline
@@ -26,15 +26,19 @@ args = {
 args = SimpleNamespace(**args)
 
 # Initialize datasets
-train_dataset, val_dataset = get_boids_datasets()
+train_files = sorted(glob.glob('../data/boids/raw/boids_0*.npy'))[:15]
+val_files = sorted(glob.glob('../data/boids/raw/boids_*.npy'))[16:25]
+
+train_dataset = BoidsBaselineDataset(train_files, timesample=1)
+val_dataset = BoidsBaselineDataset(val_files, timesample=1)
 
 # Initialize model
 device = torch.device(args.device)
-# Initialize with default parameters - adjust these based on your trained model
-model = BoidsModel(h_dim=16, m_dim=16, hidden_dim=16, layers=1).to(device)
+# Initialize with parameters matching the trained model (64, 64, 64, 4)
+model = BoidsBaselineModel(h_dim=64, m_dim=64, hidden_dim=64, layers=4).to(device)
 
 # Load model weights
-model_path = Path(__file__).resolve().parent / 'models' / 'boids_model.pth'
+model_path = Path(__file__).resolve().parent / 'models' / 'best_baseline_boids.pt'
 if model_path.exists():
     state_dict = torch.load(str(model_path), map_location=device)
     model.load_state_dict(state_dict)
@@ -57,7 +61,7 @@ else:
 wandb.init(
     entity="atai-apple-juice", 
     project=f"{args.problem}_baseline", 
-    config=args, 
+    config=args,
     tags=[f'{args.problem}_baseline']
 )
 
@@ -67,7 +71,7 @@ evaluator = Evaluator(
     train_dataset,
     val_dataset,
     args,
-    baseline=True  # Set to True to use direct model prediction instead of flow matching
+    baseline=True
 )
 
 print("Evaluating at different step sizes...")

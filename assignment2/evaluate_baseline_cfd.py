@@ -34,7 +34,7 @@ val_dataset = CFDBaselineDataset(val_files, flip_augmentation=False, timesample=
 # Initialize model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CFDBaselineModel(in_channels=4, out_channels=3, base_channels=64, mult=[1, 2, 4, 8]).to(device)
-model_path = Path(__file__).resolve().parent / 'models' / 'model3_1248_cyclic_4step_50single.pth'
+model_path = Path(__file__).resolve().parent / 'models' / 'best_baseline_cfd.pth'
 state_dict = torch.load(str(model_path), map_location=device)
 model.load_state_dict(state_dict)
 model.eval()

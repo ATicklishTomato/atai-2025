@@ -1,11 +1,14 @@
 import torch
+import numpy as np
 import wandb
 import matplotlib.pyplot as plt
 import logging
 from tqdm import tqdm
 from sklearn.cluster import DBSCAN
+from torch_geometric.data import Data
+from modules.boids_model_baseline import DOMAIN_SIZE as BOIDS_DOMAIN_SIZE
 
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
@@ -70,9 +73,16 @@ class Evaluator:
         # Input shape for Boids: [1, 25, 4] where 4 = [pos_x, pos_y, vel_x, vel_y]
         # Target shape for Boids: [1, 25, 4]
         inputs, targets = zip(*data_points)
-        inputs = torch.stack(inputs)
 
-        logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets[0].shape}")
+        if self.problem_type == 'boids' and self.baseline:
+            # For boids baseline, inputs are Data objects, and we should not stack them.
+            # Targets are also Data objects, so we extract the tensor data.
+            targets = [t.x for t in targets]
+            logger.debug(f"Input is a list of Data objects. Target shape: {targets[0].shape}")
+        else:
+            inputs = torch.stack(inputs)
+            logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets[0].shape}")
+
 
         # Create model predictions using rollout
         predictions = []
@@ -91,7 +101,7 @@ class Evaluator:
 
         return predictions, targets
     
-    def _rollout(self, input_state: Tensor, steps: int):
+    def _rollout(self, input_state: Union[Tensor, Data], steps: int):
         """
         Make an auto-regressive rollout of the model for a given number of steps.
         Return the final predicted state after the rollout.
@@ -105,8 +115,23 @@ class Evaluator:
         """
         assert steps > 0, "Number of steps must be positive."
 
-        # Input shape for CFD: [1, C+1, frame_history, 128, 64]
-        # Input shape for Boids: [1, 25, 4]
+        if self.problem_type == 'boids' and self.baseline:
+            # For boids baseline, we need to reconstruct the Data object at each step
+            edge_index = input_state.edge_index.to(self.device)
+            output_state = input_state.x.to(self.device)
+            for _ in range(steps):
+                data_obj = Data(x=output_state, edge_index=edge_index)
+                output_state = self._make_baseline_prediction(data_obj)
+                # Sanitize outputs to avoid NaNs/Infs propagating into metrics
+                # and clip velocities which can explode but are meaningless beyond domain scale.
+                output_state = torch.nan_to_num(output_state, nan=0.0, posinf=1e6, neginf=-1e6)
+                # Wrap positions to periodic domain
+                output_state[..., 0:2] = output_state[..., 0:2] % BOIDS_DOMAIN_SIZE
+                output_state[..., 2:4] = torch.clamp(output_state[..., 2:4], -1000.0, 1000.0)
+            return output_state
+
+        # Input shape for CFD: [1, C+1, frame_history, 128, 64]  
+        # Input shape for Boids: [25, 4] (no batch dimension)
         output_state = input_state.to(self.device)
         steps_done = 0
         for _ in range(steps):
@@ -118,9 +143,6 @@ class Evaluator:
                 output_state = self._make_baseline_prediction(output_state)
                 # Re-attach mask channel to maintain 4 channels for next iteration
                 output_state = torch.cat([output_state, mask_channel], dim=1)  # [1, 4, H, W]
-            if self.problem_type == 'boids' and self.baseline:
-                # For Boids baseline, just make prediction
-                output_state = self._make_baseline_prediction(output_state)
             if self.problem_type == 'cfd' and not self.baseline:
                 # Replace the output state with the prediction
                 target_shape = (output_state.shape[0], output_state.shape[1], self.predict_frames, output_state.shape[3], output_state.shape[4])
@@ -146,19 +168,18 @@ class Evaluator:
     
     def _make_baseline_prediction(
         self, 
-        input: Tensor,
+        input_data: Union[Tensor, Data],
     ):
         """
-        Generate a single prediction using the baseline model for either CFD or boids problem.
+        Generate a single prediction using the CFD baseline model.
+        Note: For boids baseline, use model.predict() directly which handles Data object conversion.
         """
         self.model.to(self.device)
         self.model.eval()
 
-        logger.info(f"Generating baseline prediction for {input.shape}.")
-
         with torch.no_grad():
-            input = input.to(self.device)
-            return self.model(input)
+            input_data = input_data.to(self.device)
+            return self.model(input_data)
 
     def _make_flow_matching_prediction(
         self, 
@@ -619,6 +640,10 @@ class Evaluator:
             # pos_tensor shape: [1, 25, 2]
             # Remove batch dimension and convert to numpy for sklearn
             positions = pos_tensor.squeeze(0).cpu().numpy()  # [25, 2]
+            # Normalize to [0, 1] domain to match DBSCAN eps scale
+            positions = positions / float(BOIDS_DOMAIN_SIZE)
+            # Guard against non-finite values before clustering
+            positions[~np.isfinite(positions)] = 0.0
             
             # Run DBSCAN clustering
             # eps is the maximum distance between two samples to be considered in the same neighborhood
