@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 import wandb
 import matplotlib.pyplot as plt
 import logging
@@ -98,6 +97,11 @@ class Evaluator:
         logger.info(f"Made predictions for {len(predictions)} data points.")
         # Keep targets as list for consistency with predictions
         targets = list(targets)
+
+        # Normalize predictions and targets for boids by dividing by domain size
+        if self.problem_type == 'boids':
+            predictions = [pred / BOIDS_DOMAIN_SIZE for pred in predictions]
+            targets = [targ / BOIDS_DOMAIN_SIZE for targ in targets]
 
         return predictions, targets
     
@@ -210,11 +214,7 @@ class Evaluator:
             input = input.to(self.device)
             
             # Define initial state x based on prior_conditioning
-            if self.problem_type == 'boids' and self.prior_conditioning:
-                x = torch.zeros_like(input)
-                x[:, :, :2] = input[:, :, :2]  + self.sigma * torch.randn_like(input[:, :, :2]).to(self.device)
-                x[:, :, 2:] = input[:, :, 2:]  + self.sigma / 100 * torch.randn_like(input[:, :, 2:]).to(self.device)
-            elif self.prior_conditioning:
+            if self.prior_conditioning:
                 # Conditional generation: start from noisy input
                 x = input + self.sigma * torch.randn_like(input).to(self.device)
             else:
@@ -640,10 +640,6 @@ class Evaluator:
             # pos_tensor shape: [1, 25, 2]
             # Remove batch dimension and convert to numpy for sklearn
             positions = pos_tensor.squeeze(0).cpu().numpy()  # [25, 2]
-            # Normalize to [0, 1] domain to match DBSCAN eps scale
-            positions = positions / float(BOIDS_DOMAIN_SIZE)
-            # Guard against non-finite values before clustering
-            positions[~np.isfinite(positions)] = 0.0
             
             # Run DBSCAN clustering
             # eps is the maximum distance between two samples to be considered in the same neighborhood

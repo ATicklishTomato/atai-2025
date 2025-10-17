@@ -14,7 +14,7 @@ script_dir = Path(__file__).resolve().parent
 os.chdir(script_dir)
 
 args = {
-    "evaluation_step_sizes": [5],
+    "evaluation_step_sizes": [5, 20, 40],
     "problem": "boids",
     "prior_conditioning": False,  # Not used for baseline, but required by Evaluator
     "euler_steps": 0,  # Not used for baseline
