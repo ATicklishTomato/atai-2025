@@ -91,3 +91,51 @@ def generate_single_prediction(
         wandb.save(save_path)
         logger.info(f"Uploaded prediction animation to wandb")
     plt.close(fig)
+
+    velocity_pred = torch.tensor(output[0, 1:3, :])  # [C=2, F, W, H]
+    pressure_pred = torch.tensor(output[0, 3, :])    # [F, W, H]
+    velocity_true = torch.tensor(target[0, 1:3, :])    # [C=2, F, W, H]
+    pressure_true = torch.tensor(target[0, 3, :])      # [F, W, H]
+
+    velocity_pred = magnitude(velocity_pred)  # [F, W, H]
+    velocity_true = magnitude(velocity_true)  # [F, W, H]
+
+    plot_comparison(velocity_pred, velocity_true, pressure_pred, pressure_true,
+                    save_path="./models/output/comparison_fields.png", save=save)
+
+
+
+def plot_comparison(velocity, velocity_test, pressure, pressure_test,
+                    save_path="./models/output/comparison_fields.png", save=False):
+    # this function plots the comparison between predicted and true fields at some timesteps
+    fig, ax = plt.subplots(4, 4, figsize=(10, 7))
+    timesteps = [5, 10, 15, 19]
+    for i, t in enumerate(timesteps):
+        # turn axis off
+        for j in range(4):
+            # only remove axis ticks
+            ax[i, j].set_xticks([])
+            ax[i, j].set_yticks([])
+            for spine in ax[i, j].spines.values():
+                spine.set_visible(False)
+        # plot the velocity magnitude and pressure at each time step
+        ax[i, 0].imshow(velocity[t].numpy(), cmap='viridis')
+        ax[i, 2].imshow(pressure[t].numpy(), cmap='viridis')
+        ax[i, 1].imshow(velocity_test[t].numpy(), cmap='viridis')
+        ax[i, 3].imshow(pressure_test[t].numpy(), cmap='viridis')
+    ax[0, 0].set_title('Predicted Velocity Magnitude')
+    ax[0, 2].set_title('Predicted Pressure')
+    ax[0, 1].set_title('True Velocity Magnitude')
+    ax[0, 3].set_title('True Pressure')
+    ax[0, 0].set_ylabel('t={t}'.format(t=timesteps[0]))
+    ax[1, 0].set_ylabel('t={t}'.format(t=timesteps[1]))
+    ax[2, 0].set_ylabel('t={t}'.format(t=timesteps[2]))
+    ax[3, 0].set_ylabel('t={t}'.format(t=timesteps[3]))
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(save_path)
+        logger.info(f"Saved comparison figure to {save_path}")
+        wandb.save(save_path)
+        logger.info(f"Uploaded comparison figure to wandb")
+    plt.close(fig)
