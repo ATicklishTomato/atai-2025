@@ -141,7 +141,7 @@ def get_model(args):
                          condition_on_history=args.vector_field_conditioning)
     elif args.problem == 'boids':
         from modules.boids_model import BoidsModel
-        model = BoidsModel(args)
+        model = BoidsModel(args.hidden_size, args.hidden_size, args.hidden_size, args.num_layers)
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
     return model
@@ -152,8 +152,8 @@ def get_dataloaders(args):
         return get_cfd_dataloaders(predict_frames=args.predict_frames, history_frames=args.history_frames,
                                    batch_size=args.batch_size)
     elif args.problem == 'boids':
-        from modules.boids_dataloaders import get_boids_dataloaders
-        return get_boids_dataloaders(args)
+        from modules.boids_dataloaders import get_boids_datasets
+        return get_boids_datasets()
     else:
         raise ValueError(f"Unknown problem type: {args.problem}")
 
@@ -186,7 +186,6 @@ def do_test(args, model, train_dataloader, val_dataloader):
             evaluator.evaluate_step_size(step_size)
         evaluator.evaluate_trajectories()
     elif args.problem == 'boids':
-        raise NotImplementedError("Testing not yet implemented for boids problem")
         evaluator = Evaluator(
             model, 
             train_dataloader, 
@@ -220,7 +219,7 @@ def main():
     args.prior_conditioning = args.condition_on in ["prior", "both"]
     args.vector_field_conditioning = args.condition_on in ["vector_field", "both"]
     args.evaluation_step_sizes = args.evaluation_step_sizes if len(args.evaluation_step_sizes) > 0 else (
-        [5, 20, 40] if args.problem == 'cfd' else [1, 2, 4, 8, 16, 32]
+        [5, 20, 40] if args.problem == 'cfd' else [5, 20, 40]
     )
 
     logging.basicConfig(

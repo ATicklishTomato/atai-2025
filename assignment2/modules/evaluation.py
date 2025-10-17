@@ -3,29 +3,25 @@ import wandb
 import matplotlib.pyplot as plt
 import logging
 from tqdm import tqdm
+from sklearn.cluster import DBSCAN
+from torch_geometric.data import Data
+from modules.boids_model_baseline import DOMAIN_SIZE as BOIDS_DOMAIN_SIZE
 
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
 class Evaluator:
-    def __init__(self, model, train_dataset, val_dataset, args):
+    def __init__(self, model, train_dataset, val_dataset, args, baseline: bool = False):
         """
-        Provide the model, datasets, and problem type to evaluate various metrics.
+        Provide the model, datasets, baseline, and problem type to evaluate various metrics.
         Results are logged to wandb.
-
-        The datasets need to provide the following methods:
-        - `get_step_data_points(steps: int)` -> List[Tuple[Tensor, Tensor]]: To get the all pairs of data points within the same sequence that
-            have an initial frame and a target frame separated by `steps` frames. This is used
-            to evaluate the prediction of `steps` steps. When this method is called with the maximum step size, 
-            it should return one data point per trajectory (the initial state).
-        - `get_maximum_step_size() -> int`: To get the maximum `step` size, such that there is one data point
-            per sequence.
         """
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.baseline = baseline
 
         self.problem_type = args.problem
         self.prior_conditioning = args.prior_conditioning
@@ -34,7 +30,7 @@ class Evaluator:
         self.sigma = args.sigma  # Noise level for flow matching generation
         self.use_tqdm = args.use_tqdm
 
-        if self.problem_type == 'cfd':
+        if self.problem_type == 'cfd' and not self.baseline:
             self.predict_frames = self.val_dataset.predict_frames
 
         # The training dataset and validation set have the same maximum step size.
@@ -73,12 +69,19 @@ class Evaluator:
         # Unpack the data points into input and target tensors
         # Input shape for CFD: [1, C+1, frame_history, 128, 64]
         # Target shape for CFD: [1, C+1, 1, 128, 64]
-        # Input shape for Boids: [1, 25, C]
-        # Target shape for Boids: [1, 25, C]
+        # Input shape for Boids: [1, 25, 4] where 4 = [pos_x, pos_y, vel_x, vel_y]
+        # Target shape for Boids: [1, 25, 4]
         inputs, targets = zip(*data_points)
-        inputs = torch.stack(inputs)
 
-        logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets[0].shape}")
+        if self.problem_type == 'boids' and self.baseline:
+            # For boids baseline, inputs are Data objects, and we should not stack them.
+            # Targets are also Data objects, so we extract the tensor data.
+            targets = [t.x for t in targets]
+            logger.debug(f"Input is a list of Data objects. Target shape: {targets[0].shape}")
+        else:
+            inputs = torch.stack(inputs)
+            logger.debug(f"Input shape: {inputs.shape}, Target shape: {targets[0].shape}")
+
 
         # Create model predictions using rollout
         predictions = []
@@ -87,7 +90,7 @@ class Evaluator:
         for input in inputs:
             # The prediction shape should match the target shape.
             # Prediction shape for CFD: [1, C+1, 1, 128, 64]
-            # Prediction shape for Boids: [1, 25, C]
+            # Prediction shape for Boids: [1, 25, 4]
             prediction = self._rollout(input, steps)
             predictions.append(prediction)
 
@@ -95,9 +98,14 @@ class Evaluator:
         # Keep targets as list for consistency with predictions
         targets = list(targets)
 
+        # Normalize predictions and targets for boids by dividing by domain size
+        if self.problem_type == 'boids':
+            predictions = [pred / BOIDS_DOMAIN_SIZE for pred in predictions]
+            targets = [targ / BOIDS_DOMAIN_SIZE for targ in targets]
+
         return predictions, targets
     
-    def _rollout(self, input_state: Tensor, steps: int):
+    def _rollout(self, input_state: Union[Tensor, Data], steps: int):
         """
         Make an auto-regressive rollout of the model for a given number of steps.
         Return the final predicted state after the rollout.
@@ -111,12 +119,35 @@ class Evaluator:
         """
         assert steps > 0, "Number of steps must be positive."
 
-        # Input shape for CFD: [1, C+1, frame_history, 128, 64]
-        # Input shape for Boids: [1, 25, C]
+        if self.problem_type == 'boids' and self.baseline:
+            # For boids baseline, we need to reconstruct the Data object at each step
+            edge_index = input_state.edge_index.to(self.device)
+            output_state = input_state.x.to(self.device)
+            for _ in range(steps):
+                data_obj = Data(x=output_state, edge_index=edge_index)
+                output_state = self._make_baseline_prediction(data_obj)
+                # Sanitize outputs to avoid NaNs/Infs propagating into metrics
+                # and clip velocities which can explode but are meaningless beyond domain scale.
+                output_state = torch.nan_to_num(output_state, nan=0.0, posinf=1e6, neginf=-1e6)
+                # Wrap positions to periodic domain
+                output_state[..., 0:2] = output_state[..., 0:2] % BOIDS_DOMAIN_SIZE
+                output_state[..., 2:4] = torch.clamp(output_state[..., 2:4], -1000.0, 1000.0)
+            return output_state
+
+        # Input shape for CFD: [1, C+1, frame_history, 128, 64]  
+        # Input shape for Boids: [25, 4] (no batch dimension)
         output_state = input_state.to(self.device)
         steps_done = 0
         for _ in range(steps):
-            if self.problem_type == 'cfd':
+            if self.problem_type == 'cfd' and self.baseline:
+                # For CFD baseline, preserve the mask channel
+                # Extract mask channel (last channel) before prediction
+                mask_channel = output_state[:, -1:, :, :]  # [1, 1, H, W]
+                # Make prediction (returns 3 channels: u, v, p)
+                output_state = self._make_baseline_prediction(output_state)
+                # Re-attach mask channel to maintain 4 channels for next iteration
+                output_state = torch.cat([output_state, mask_channel], dim=1)  # [1, 4, H, W]
+            if self.problem_type == 'cfd' and not self.baseline:
                 # Replace the output state with the prediction
                 target_shape = (output_state.shape[0], output_state.shape[1], self.predict_frames, output_state.shape[3], output_state.shape[4])
                 output_state = self._make_flow_matching_prediction(output_state, target_shape)
@@ -127,17 +158,33 @@ class Evaluator:
                         # Trim the excess frames to match the exact number of steps
                         output_state = output_state[:, :, -excess:, :, :]
                     break
-            if self.problem_type == 'boids':
+            if self.problem_type == 'boids' and not self.baseline:
                 # Replace the output state with the prediction
                 output_state = self._make_flow_matching_prediction(output_state)
 
-        if self.problem_type == 'cfd':
+        if self.problem_type == 'cfd' and not self.baseline:
             # For CFD: Return only the last frame
             return output_state[:, :, -1:, :, :]
-        if self.problem_type == 'boids':
+        else:
             # For boids: Return the full prediction directly
+            # For baseline: Return the full prediction directly
             return output_state
     
+    def _make_baseline_prediction(
+        self, 
+        input_data: Union[Tensor, Data],
+    ):
+        """
+        Generate a single prediction using the CFD baseline model.
+        Note: For boids baseline, use model.predict() directly which handles Data object conversion.
+        """
+        self.model.to(self.device)
+        self.model.eval()
+
+        with torch.no_grad():
+            input_data = input_data.to(self.device)
+            return self.model(input_data)
+
     def _make_flow_matching_prediction(
         self, 
         input: Tensor,
@@ -326,10 +373,17 @@ class Evaluator:
         In this case C=3 and we add one dimension for the mask, resulting in 4 indices for the 2nd dimension.
         The velocity features are on the first 2 indices of the 2nd dimension.
 
-        For the boids problem 
+        For the boids problem, the tensors have shape [1, 25, 4] where the 25 is the number of boids
+        and 4 is the number of features: [pos_x, pos_y, vel_x, vel_y].
+        The velocity features are on indices 2 and 3 of the last dimension.
         """
         # Extract the velocity features for each problem.
         if self.problem_type == 'cfd':
+            if self.baseline:
+                # Update baseline predictions and targets shape to match time bundling dimensions: [1, C, 128, 64] -> [1, C, 1, 128, 64]
+                predictions = [pred.unsqueeze(2) for pred in predictions]
+                targets = [target.unsqueeze(2) for target in targets]
+
             # The state space contains 64x128 cells each of which contain a velocity (2d) and pressure (1d).
             # Input shape: [1, 4, 1, 128, 64] where dimension 1 has [vx, vy, pressure, mask]
             # Extract velocity_x and velocity_y from indices 0 and 1 of dimension 1
@@ -416,10 +470,13 @@ class Evaluator:
         plt.title('Velocity Density')
         plt.xlabel('Velocity Magnitude')
         plt.ylabel('Frequency')
-        plt.savefig(f'./models/output/{self.problem_type}_velocity_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_velocity_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_velocity_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_velocity_density.png')})
+        wandb.log({
+            f"{self.problem_type}_velocity_density_plot_{baseline_suffix}":
+                wandb.Image(f'./models/output/{self.problem_type}_velocity_density_{baseline_suffix}.png')
+        })
 
         # Compute KL divergence KL(P || Q) with P=pred, Q=target
         # kl_div expects log-probabilities as input and probabilities as target
@@ -437,6 +494,11 @@ class Evaluator:
         are extracted separately for each problem.
         """
         assert self.problem_type == 'cfd', "_evaluate_pressure_density is only defined for CFD."
+
+        if self.baseline:
+            # Update baseline predictions and targets shape to match time bundling dimensions: [1, C, 128, 64] -> [1, C, 1, 128, 64]
+            predictions = [pred.unsqueeze(2) for pred in predictions]
+            targets = [target.unsqueeze(2) for target in targets]
 
         # Extract pressure channel (index 2 of the 2nd dimension) and flatten
         prediction_pressure_list = []
@@ -484,10 +546,13 @@ class Evaluator:
         plt.title('Pressure Density')
         plt.xlabel('Pressure')
         plt.ylabel('Density')
-        plt.savefig(f'./models/output/{self.problem_type}_pressure_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_pressure_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_pressure_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_pressure_density.png')})
+        wandb.log({
+            f"{self.problem_type}_pressure_density_plot_{baseline_suffix}":
+                wandb.Image(f'./models/output/{self.problem_type}_pressure_density_{baseline_suffix}.png')
+        })
 
         # Compute KL divergence KL(P || Q) with P=pred, Q=target
         # kl_div expects log-probabilities as input and probabilities as target
@@ -500,40 +565,54 @@ class Evaluator:
     def _evaluate_cluster_density(self, predictions, targets):
         """
         Evaluate the cluster density of the predictions.
+        
+        For boids, predictions and targets are lists of Tensors of shape [1, 25, 4]
+        where features are [pos_x, pos_y, vel_x, vel_y].
+        We extract position features (first 2 dimensions) for clustering.
         """
-        # TODO: Extract the position features for the boids problem.
-        position_features_predictions = predictions
-        position_features_targets = targets
+        # Extract the position features for the boids problem.
+        # Each tensor is [1, 25, 4], we want [1, 25, 2] with just positions
+        position_features_predictions = [pred[..., :2] for pred in predictions]
+        position_features_targets = [target[..., :2] for target in targets]
 
         cluster_features_predictions = self._compute_cluster_features(position_features_predictions)
         cluster_features_targets = self._compute_cluster_features(position_features_targets)
 
         assert len(cluster_features_predictions) == len(cluster_features_targets), "Cluster features and cluster features targets must have the same length."
 
-        # Compute the cluster density of the predictions.
-        cluster_density_predictions = torch.histc(cluster_features_predictions, bins=10, min=0, max=1)
-
-        # Compute the cluster density of the targets.
-        cluster_density_targets = torch.histc(cluster_features_targets, bins=10, min=0, max=1)
+        # Determine the range for histogram bins based on combined data
+        combined = torch.cat([cluster_features_predictions, cluster_features_targets], dim=0)
+        max_clusters = int(torch.max(combined).item())
+        
+        # Compute the cluster density histograms with proper normalization
+        eps = 1e-8
+        num_bins = min(max_clusters + 1, 10)  # Use at most 10 bins
+        counts_pred = torch.histc(cluster_features_predictions.float(), bins=num_bins, min=0, max=max(max_clusters, 1))
+        counts_targ = torch.histc(cluster_features_targets.float(), bins=num_bins, min=0, max=max(max_clusters, 1))
+        
+        # Convert to probability distributions with epsilon smoothing
+        cluster_density_predictions = (counts_pred + eps) / (counts_pred.sum() + eps * num_bins)
+        cluster_density_targets = (counts_targ + eps) / (counts_targ.sum() + eps * num_bins)
 
         logger.info("Making cluster density plot and logging to wandb.")
         # Make density plot
         plt.figure()
-        plt.hist(cluster_features_predictions.cpu().numpy(), bins=10, alpha=0.5, label='Predictions')
-        plt.hist(cluster_features_targets.cpu().numpy(), bins=10, alpha=0.5, label='Targets')
+        plt.hist(cluster_features_predictions.cpu().numpy(), bins=num_bins, alpha=0.5, label='Predictions', range=(0, max(max_clusters, 1)))
+        plt.hist(cluster_features_targets.cpu().numpy(), bins=num_bins, alpha=0.5, label='Targets', range=(0, max(max_clusters, 1)))
         plt.legend()
         plt.title('Cluster Density')
         plt.xlabel('Number of Clusters')
         plt.ylabel('Frequency')
-        plt.savefig(f'./models/output/{self.problem_type}_cluster_density.png')
+        baseline_suffix = 'baseline' if self.baseline else ''
+        plt.savefig(f'./models/output/{self.problem_type}_cluster_density_{baseline_suffix}.png')
         plt.close()
-        wandb.log({f"{self.problem_type}_cluster_density_plot":
-                       wandb.Image(f'./models/output/{self.problem_type}_cluster_density.png')})
+        wandb.log({f"{self.problem_type}_cluster_density_plot_{baseline_suffix}":
+                       wandb.Image(f'./models/output/{self.problem_type}_cluster_density_{baseline_suffix}.png')})
 
-
-        # Compute the kullback-leibler divergence between of the predicted cluster densities under the target cluster densities.
-        # TODO: Check whether we need to use reduction here.
-        kl_divergence = torch.nn.functional.kl_div(cluster_density_predictions, cluster_density_targets, reduction='sum')
+        # Compute KL divergence KL(pred || target)
+        # kl_div expects log-probabilities as input and probabilities as target
+        log_target = torch.log(cluster_density_targets)
+        kl_divergence = torch.nn.functional.kl_div(log_target, cluster_density_predictions, reduction='sum')
 
         return kl_divergence, cluster_density_predictions, cluster_density_targets
 
@@ -541,9 +620,43 @@ class Evaluator:
         """
         Compute the number of clusters found in the position features for the boids problem.
 
-        The input shape should be (N, 25, 2) with N the number of states.
-        The output shape should be (N, 1) with N the number of states.
+        Uses DBSCAN clustering algorithm to identify spatial clusters in boid positions.
+        The input is a list of tensors, each with shape [1, 25, 2] representing positions.
+        The output is a tensor of shape [N] with N the number of states, containing cluster counts.
+        
+        DBSCAN parameters:
+        - eps=0.1: Maximum distance for neighborhood (tuned for normalized [0,1] positions)
+        - min_samples=2: Minimum 2 boids to form a cluster (allows pairs)
+        
+        Args:
+            position_features: List of tensors with shape [1, 25, 2]
+            
+        Returns:
+            cluster_counts: Tensor of shape [N] containing the number of clusters for each state
         """
-        # TODO: Run a clustering algorithm on each of the position_features to determine the number of clusters
-        cluster_features = None
-        return cluster_features
+        cluster_counts = []
+        
+        for pos_tensor in position_features:
+            # pos_tensor shape: [1, 25, 2]
+            # Remove batch dimension and convert to numpy for sklearn
+            positions = pos_tensor.squeeze(0).cpu().numpy()  # [25, 2]
+            
+            # Run DBSCAN clustering
+            # eps is the maximum distance between two samples to be considered in the same neighborhood
+            # For normalized positions (0-1), use a small eps value
+            # min_samples is the minimum number of samples in a neighborhood to form a cluster
+            # Using min_samples=2 to allow pairs of boids to form clusters
+            clustering = DBSCAN(eps=0.1, min_samples=2).fit(positions)
+            
+            # Get cluster labels (-1 means noise/outlier)
+            labels = clustering.labels_
+            
+            # Count the number of unique clusters (excluding noise labeled as -1)
+            num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+            
+            cluster_counts.append(num_clusters)
+        
+        # Convert to tensor
+        cluster_counts = torch.tensor(cluster_counts, dtype=torch.float32)
+        
+        return cluster_counts

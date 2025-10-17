@@ -13,4 +13,8 @@ data/boids_sensitivity/processed/*
 **/__pycache__/*
 *.log
 **/wandb/*
+
+# Ignore all model files except the best baseline models
 assignment2/models/*.pth
+!assignment2/models/best_baseline_boids.pt
+!assignment2/models/best_baseline_cfd.pth
